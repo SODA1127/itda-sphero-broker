@@ -25,6 +25,21 @@ Sphero BOLT 로봇(R1·R2·R3)과 Android 앱을 연결하는 Flask 브로커 �
 - **예외 처리 E1–E5**: E4(명령 실패)·E5(로봇 미연결)는 주행 중 자동 표시. 나머지는 눌러서 시연용으로 발생시킨다(표시·로그만).
 - **R2 카메라 감지**: Android 앱이 보낸 대피자 움직임·넘어짐을 표시한다.
 
+## R2 카메라 추적 (Android 앱 연동)
+
+R2 트롤리에 실은 스마트폰 앱([itda-spherocam](https://github.com/SODA1127/itda-spherocam))이 ML Kit Pose Detection으로 대피자를 추적한다.
+앱은 방향(`/api/follow/direction`)과 JPEG 프리뷰(`/api/follow/preview`)를 브로커로 보내고, 대시보드에 카메라 화면과 감지 결과가 표시된다.
+(아래는 초기 추종 모드 화면. 지금 브로커는 카메라 감지를 기록·표시만 하고, R2 주행은 R1 경로를 따른다.)
+
+| 장면 | 화면 | 감지 기준 |
+|:---:|:---:|:---|
+| **전진** | ![전진](docs/camera/direction_forward.jpg) | 사람이 카메라에서 멀어짐 → 면적 감소 → `forward` |
+| **후진** | ![후진](docs/camera/direction_back.jpg) | 사람이 너무 가까이 접근 → 면적 비율 초과 → `back` |
+| **좌회전** | ![좌회전](docs/camera/direction_left.jpg) | 사람이 화면 왼쪽으로 이동 → X 중심 감소 → `left` |
+| **우회전** | ![우회전](docs/camera/direction_right.jpg) | 사람이 화면 오른쪽으로 이동 → X 중심 증가 → `right` |
+| **정지** | ![정지](docs/camera/direction_stop.jpg) | 면적 변화 없이 정면 위치 → `stop` |
+| **넘어짐 감지** | ![넘어짐](docs/camera/direction_fallen.jpg) | W/H 비율 > 1.5가 3초 지속 → ⚠ 넘어짐 경고, 대시보드·로그에 표시 |
+
 ## 시스템 구성
 
 게이트웨이 노트북 1대가 서버·대시보드와 BLE 게이트웨이를 맡는다. 로봇 간 간격 유지는 IR, 트리거 전달·층간 인수인계는 서버(BLE)가 담당한다.
