@@ -25,6 +25,30 @@ Sphero BOLT 로봇(R1·R2·R3)과 Android 앱을 연결하는 Flask 브로커 �
 - **예외 처리 E1–E5**: E4(명령 실패)·E5(로봇 미연결)는 주행 중 자동 표시. 나머지는 눌러서 시연용으로 발생시킨다(표시·로그만).
 - **R2 카메라 감지**: Android 앱이 보낸 대피자 움직임·넘어짐을 표시한다.
 
+## 시스템 구성
+
+게이트웨이 노트북 1대가 서버·대시보드와 BLE 게이트웨이를 맡는다. 로봇 간 간격 유지는 IR, 트리거 전달·층간 인수인계는 서버(BLE)가 담당한다.
+
+![시스템 구성도](docs/system-architecture.png)
+
+## 전체 동작 순서도
+
+IDLE → ARMED → GUIDING → HANDOFF → COMPLETE 흐름과 예외 처리 E2–E5 분기.
+
+<img src="docs/flowchart.png" alt="전체 동작 순서도" width="640">
+
+## 시연 장소 — 팔달관
+
+2층 복도 → 계단실 → 1층 로비 → 비상구 경로. 층별 도면은 `팔달관_도면.pdf`.
+
+| 2층 복도 | 2층 난간 (유리막) | 계단실 | 계단실 (층간) |
+|---|---|---|---|
+| ![2층 복도](docs/site/paldal-corridor.jpg) | ![2층 난간](docs/site/paldal-2f-railing.jpg) | ![계단실 1](docs/site/paldal-stairs-01.jpg) | ![계단실 2](docs/site/paldal-stairs-02.jpg) |
+
+| 팔달관 2층 도면 (스피로 경로) | 팔달관 1층 도면 (스피로 경로) |
+|---|---|
+| ![2층 도면](floorplan_2f.png) | ![1층 도면](floorplan_1f.png) |
+
 ## 구성
 
 | 파일 | 설명 |
