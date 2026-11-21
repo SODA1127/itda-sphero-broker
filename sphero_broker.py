@@ -35,30 +35,106 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
 # ── 설정 ───────────────────────────────────────────────────────────────────────
 SPHERO_2F_NAME  = "SB-25D4"   # 2층 Sphero BLE 이름 (R1 선두)
 SPHERO_1F_NAME  = "SB-D721"   # 1층 Sphero BLE 이름 (R3 대기)
-SPHERO_R2_NAME  = ""          # 2층 후방 Sphero BLE 이름 (R2, 스마트폰 트롤리)
-# R2는 R1 바로 뒤 같은 선상에 두고 출발 → 이 시간만큼 직진해 R1 출발점에 온 뒤 R1 경로를 그대로 재생
-# (간격 ≈ R1 첫 구간 속도 × 이 시간 — 현장에서 실측 후 조정)
-R2_GAP_SEC      = 2.0
+SPHERO_R2_NAME  = "SB-3601"   # 2층 후방 Sphero BLE 이름 (R2, 스마트폰 트롤리)
 FLASK_PORT      = 5001
 FLOORPLAN_PDF   = os.path.join(os.path.dirname(__file__), "팔달관_도면.pdf")
 SHAKE_THRESHOLD = 2.5          # G  — 이 이상이면 흔들기 신호로 판정
 SIGNAL_COOLDOWN = 10           # 초  — 한 번 신호 후 재차단 시간
 
-# 2F 경로: (속도, 헤딩, 지속 초, 매트릭스 표시 문자)
-# ※ 헤딩은 시연 장소 calibrate 후 수정 (0=북, 90=동, 180=남, 270=서)
-EVAC_PATH_2F = [
-    (60,   0,  2.0, "^"),   # 직진 2초 → 매트릭스 ↑
-    (60,  90,  1.5, ">"),   # 우회전 1.5초 → 매트릭스 →
-    (0,    0,  0.0, "v"),   # 정지 (계단 앞 핸드오프) → 매트릭스 ↓
+# ── 대피 경로 (팔달관 도면 실측 기준) ────────────────────────────────────────
+# 구간 = (헤딩, 거리 m). 헤딩 0° = R2 스마트폰 셀피 카메라 정면 = 경로 첫 구간 방향.
+# 90 = 우회전, 270 = 좌회전. 출발 전 대시보드 "방향 보정"으로 각 로봇 정면을 셀피 정면에 맞춰 0°로 저장.
+# 속도 기본값 (0~255) — 대시보드 "주행 속도"에서 바꾸면 speed_settings.json에 저장돼 재시작 후에도 유지
+DEFAULT_SPEEDS = {
+    "floor2": 100,     # R1 (2층 선두)
+    "rear":   150,     # R2 (2층 후방) — 스마트폰을 실어 무거우므로 더 세게. 실제 속도가 R1과 같아야 간격 유지
+    "floor1": 100,     # R3 (1층)
+}
+DEFAULT_TURN_PAUSE_SEC = 1.0 # 꺾기 전 정지 시간 — 멈춘 동안 매트릭스에 꺾는 방향 화살표 (0~10초)
+DEFAULT_R2_DIST_PCT = 100     # R2 거리 보정(%) — 폰 무게로 덜 가면 올림. 구간 시간에 곱해 같은 비율로 더 감 (50~200)
+DEFAULT_R2_DELAY_SEC = 3.0   # R2(후방)는 R1보다 이만큼 늦게 출발 — 대피자가 먼저 움직이고 R2가 뒤따름 (0~30초)
+SPEED_REF      = 100   # DRIVE_MPS를 잰 기준 속도 값
+DRIVE_MPS      = 0.8   # R1이 SPEED_REF로 1초에 가는 거리(m) — 현장 바닥에서 실측 후 수정
+                       # 측정: 3초 직진시켜 이동 거리 ÷ 3. 구간 시간 = 거리 ÷ (이 값 × 속도/SPEED_REF)
+FOLLOW_GAP_M   = 4.0   # R1(전방)–R2(후방) 간격 — 사이에 대피자. R2는 경로 출발점, R1은 4m 앞에서 출발
+FOLLOW_END_GAP_M = 1.0 # 도착 때 R2가 R1 뒤에 남기는 간격 — R2는 출발 4m 차이를 따라잡아 R1 바로 뒤까지 간다
+
+# 2층 (현재 시연용): 중앙 복도 모서리(보이드 아래) 출발 → 직진 → 좌회전 → 계단(EXIT). 모든 재난 유형 공통
+# 도면 전체 경로로 되돌릴 때: (0,0.9) (270,5.7) (0,5.7) (270,9.0) + 대시보드 ROUTE_2F 꺾임점 5개
+ROUTE_2F_M = [
+    (0,   5.7),        # ③ 19칸 — 직진 (중앙 복도)
+    (270, 9.0),        # ④ 30칸 — 좌회전, 계단 앞 핸드오프
+]
+ROUTE_1F_M = [         # 1층: 137호 옆 계단(출발) → 로비 → 주출입구(EXIT)
+    (0,   7.5),        # ① 25칸
+    (90,  7.5),        # ② 25칸 — 우회전
 ]
 
-# 1F 경로: (속도, 헤딩, 지속 초, 매트릭스 표시 문자)
-EVAC_PATH_1F = [
-    (60,   0,  2.0, "^"),   # 직진 2초
-    (60,  90,  1.5, ">"),   # 우회전 1.5초
-    (50, 180,  1.0, "v"),   # 비상구 방향 1초
-    (0,    0,  0.0, "!"),   # 정지 (비상구 도달)
-]
+_ARROW = {0: "^", 90: ">", 180: "v", 270: "<"}
+
+def _slice_route(route, start_m, end_m):
+    """경로 중 start_m ~ end_m 구간만 (헤딩, m) 목록으로 잘라 낸다 (꺾이는 지점은 그대로)"""
+    out, pos = [], 0.0
+    for h, m in route:
+        a, b = max(pos, start_m), min(pos + m, end_m)
+        if b - a > 1e-6:
+            out.append((h, round(b - a, 2)))
+        pos += m
+    return out
+
+def _route_to_path(route, end_char, speed):
+    """(헤딩, m) 구간 → (속도, 헤딩, 지속 초, 매트릭스 문자) 주행 단계. 시간은 R1 기준 속도로 환산"""
+    path = [(speed, h, round(m / DRIVE_MPS, 2), _ARROW.get(h % 360, "^")) for h, m in route]
+    return path + [(0, route[-1][0], 0.0, end_char)]
+
+def _path_meters(path):
+    return [round(dur * DRIVE_MPS, 2) if spd > 0 else 0.0 for spd, _, dur, _ in path]
+
+ROUTE_2F_LEN = sum(m for _, m in ROUTE_2F_M)
+
+# 주행 단계: (속도, 헤딩, 지속 초, 매트릭스 표시 문자)
+# R1·R2는 같은 경로 위를 달려 같은 지점에서 꺾는다. R1은 4m 앞에서 출발, R2는 출발점에서 출발해 R1 정지점 1m 뒤까지 간다
+# 지속 시간은 SPEED_REF 기준값 — 실제 주행 때 설정 속도에 맞춰 _run_path가 늘리거나 줄인다
+EVAC_PATH_2F = _route_to_path(_slice_route(ROUTE_2F_M, FOLLOW_GAP_M, ROUTE_2F_LEN), "v", DEFAULT_SPEEDS["floor2"])
+EVAC_PATH_R2 = _route_to_path(_slice_route(ROUTE_2F_M, 0, ROUTE_2F_LEN - FOLLOW_END_GAP_M), "v", DEFAULT_SPEEDS["rear"])
+EVAC_PATH_1F = _route_to_path(ROUTE_1F_M, "!", DEFAULT_SPEEDS["floor1"])    # 마지막: 정지 (비상구 도달)
+
+SPEED_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "speed_settings.json")
+
+def _load_speeds():
+    speeds = dict(DEFAULT_SPEEDS)
+    try:
+        with open(SPEED_FILE, encoding="utf-8") as f:
+            saved = json.load(f)
+        for k in speeds:
+            if isinstance(saved.get(k), int) and 1 <= saved[k] <= 255:
+                speeds[k] = saved[k]
+    except (OSError, ValueError):
+        pass
+    return speeds
+
+def _load_aim_trim():
+    """로봇별 자동 에임 보정값(도) — 자동 에임 뒤 수동 미세 조정한 만큼 누적"""
+    trim = {"floor2": 0, "rear": 0, "floor1": 0}
+    try:
+        with open(SPEED_FILE, encoding="utf-8") as f:
+            saved = json.load(f).get("aim_trim") or {}
+        for k in trim:
+            if isinstance(saved.get(k), (int, float)):
+                trim[k] = int(saved[k])
+    except (OSError, ValueError, AttributeError):
+        pass
+    return trim
+
+def _load_setting(key, default, lo, hi):
+    try:
+        with open(SPEED_FILE, encoding="utf-8") as f:
+            v = json.load(f).get(key)
+        if isinstance(v, (int, float)) and lo <= v <= hi:
+            return float(v)
+    except (OSError, ValueError, AttributeError):
+        pass
+    return default
 
 # 안내 대상 모드 — mps 비율로 Sphero 속도를 낮추고 지속 시간을 늘려 같은 거리를 간다
 TARGET_MODES = {
@@ -93,7 +169,7 @@ state = {
     "floor1": {"connected": False, "moving": False, "step": 0,
                "total_steps": len(EVAC_PATH_1F), "battery": 0},
     "rear":   {"connected": False, "moving": False, "step": 0,
-               "total_steps": len(EVAC_PATH_2F) + 1, "battery": 0},
+               "total_steps": len(EVAC_PATH_R2), "battery": 0},
     "trigger_count": 0,
     "phase": "idle",            # idle → armed → guiding → handoff → complete
     "disaster": None,           # fire / quake / black
@@ -104,6 +180,16 @@ state = {
     "sim_mode": False,
     "names": {"floor2": SPHERO_2F_NAME, "floor1": SPHERO_1F_NAME, "rear": SPHERO_R2_NAME},
     "connecting": False,
+    "speeds": _load_speeds(),
+    "r2_delay": _load_setting("r2_delay", DEFAULT_R2_DELAY_SEC, 0, 30),
+    "turn_pause": _load_setting("turn_pause", DEFAULT_TURN_PAUSE_SEC, 0, 10),
+    "aim_trim": _load_aim_trim(),
+    "r2_dist_pct": _load_setting("r2_dist_pct", DEFAULT_R2_DIST_PCT, 50, 200),
+    # 앱이 보낸 셀피 카메라 정면 방위 (자북 기준 시계 방향 도). quality: 1 = 폰 세움, 0 = 눕힘
+    "phone": {"azimuth": None, "quality": 0.0, "accuracy": None, "ts": 0.0},
+    # 나침반 자동 에임 진행 상태 (로봇별)
+    "aim": {"floor2": {"status": "", "msg": ""}, "rear": {"status": "", "msg": ""},
+            "floor1": {"status": "", "msg": ""}},
 }
 _state_lock = threading.Lock()
 
@@ -245,11 +331,6 @@ def _scroll_connected(bolt, floor_num: str, r: int, g: int, b: int):
     # 스크롤 완료 → 숫자 고정
     _set_matrix(bolt, r, g, b, floor_num)
 
-def _r2_path(path):
-    """R1 출발점까지 간격 구간을 먼저 달린 뒤 R1 경로를 그대로 따라간다."""
-    first_speed, first_heading = path[0][0], path[0][1]
-    return [(first_speed, first_heading, R2_GAP_SEC, "^")] + list(path)
-
 def _run_2f_then_1f(gen):
     """2F 경로(R1 선두 + R2 후방 추종) 완료 → 1F 자동 출발 (연결된 쪽만 실행)"""
     def live():
@@ -271,12 +352,7 @@ def _run_2f_then_1f(gen):
         raise_exception("E5", "R3 미연결 → 1층 인수인계 불가")
     _set_phase("guiding")
     if r2_on:
-        threading.Thread(
-            target=_run_path,
-            args=(_bolt_r2, _r2_path(EVAC_PATH_2F), "rear", "R2"),
-            kwargs={"move_color": (255, 180, 0), "done_color": (255, 0, 0), "gen": gen},
-            daemon=True,
-        ).start()
+        threading.Thread(target=_run_r2_delayed, args=(gen, state["r2_delay"]), daemon=True).start()
     if r1_on or r2_on:
         if not r1_on:
             log_event("ℹ️  R1 미연결 — R2만 R1 경로를 따라 주행")
@@ -295,6 +371,18 @@ def _run_2f_then_1f(gen):
             return
         log_event("🚪 R3 비상구 도달")
     _set_phase("complete")
+
+def _run_r2_delayed(gen, delay):
+    """R2는 delay초 뒤 출발 — 대기 중 상황 해제되면 출발하지 않음"""
+    if delay > 0:
+        log_event(f"  R2 {delay:g}초 뒤 출발")
+        end = time.time() + delay
+        while time.time() < end:
+            if gen != _run_gen:
+                return
+            time.sleep(0.05)
+    _run_path(_bolt_r2, EVAC_PATH_R2, "rear", "R2",
+              move_color=(255, 180, 0), done_color=(255, 0, 0), gen=gen)
 
 def _run_path(bolt, path, state_key, label, move_color, done_color, gen=None):
     """범용 경로 실행 — 2F/1F 공통. 상황 해제(세대 변경) 시 멈추고 False 반환"""
@@ -320,17 +408,42 @@ def _run_path(bolt, path, state_key, label, move_color, done_color, gen=None):
 
     _set_led(bolt, *move_color)
     factor = TARGET_MODES[state["target"]]["mps"]
+    with _state_lock:
+        my_speed   = state["speeds"][state_key]
+        lead_speed = state["speeds"]["floor1" if state_key == "floor1" else "floor2"]
+    time_scale = SPEED_REF / lead_speed
+    if state_key == "rear":
+        time_scale *= state["r2_dist_pct"] / 100
+    turn_pause = state["turn_pause"]
+    prev_heading = None
 
     for i, (speed, heading, duration, char) in enumerate(path):
         if cancelled():
             return abort()
+        if duration > 0 and prev_heading is not None and heading != prev_heading and turn_pause > 0:
+            turn = (heading - prev_heading) % 360
+            if bolt is not None:
+                try:
+                    bolt.drive_control.roll_stop(prev_heading)
+                except Exception:
+                    pass
+            _set_matrix(bolt, *move_color, _ARROW.get(turn, "^"))   # 몸체 기준: 왼쪽 < / 오른쪽 >
+            log_event(f"  ↪ {label} {'좌' if turn == 270 else '우' if turn == 90 else ''}회전 전 {turn_pause:g}초 정지")
+            end = time.time() + turn_pause
+            while time.time() < end and not cancelled():
+                time.sleep(0.05)
+            if cancelled():
+                return abort()
         with _state_lock:
             state[state_key]["step"] = i + 1
 
-        _set_matrix(bolt, *move_color, char)
+        # 매트릭스는 몸체와 함께 돌아가므로 주행 중엔 항상 전방 화살표, 정지 시 지정 문자
+        _set_matrix(bolt, *move_color, "^" if duration > 0 else char)
 
         if duration > 0:
-            speed, duration = int(speed * factor), round(duration / factor, 2)
+            prev_heading = heading
+            speed    = min(255, int(my_speed * factor))
+            duration = round(duration * time_scale / factor, 2)
             log_event(f"  → {label} step {i+1}/{len(path)}: "
                       f"속도={speed}  방향={heading}°  {duration}s  [{char}]")
             if bolt is not None:
@@ -462,6 +575,7 @@ def _broker_main(sim: bool):
         state["floor1"]["connected"] = bool(toy_1f)
         state["rear"]["connected"]   = bool(toy_r2)
         state["connecting"] = False
+        state["aim"] = {k: {"status": "", "msg": ""} for k in ("floor2", "rear", "floor1")}
 
     connected = [f for f, t in [("2F", toy_2f), ("1F", toy_1f), ("R2", toy_r2)] if t]
     skipped   = [f for f, n in [("2F", name_2f), ("1F", name_1f), ("R2", name_r2)] if not n]
@@ -614,6 +728,14 @@ def api_status():
             "names":         state["names"],
             "connecting":    state["connecting"],
             "server_ip":     _lan_ip(),
+            "phone":         {**state["phone"],
+                              "age": round(time.time() - state["phone"]["ts"], 1) if state["phone"]["ts"] else None},
+            "aim":           state["aim"],
+            "speeds":        state["speeds"],
+            "r2_delay":      state["r2_delay"],
+            "turn_pause":    state["turn_pause"],
+            "aim_trim":      state["aim_trim"],
+            "r2_dist_pct":   state["r2_dist_pct"],
         })
 
 @app.route("/api/connect", methods=["POST"])
@@ -713,6 +835,9 @@ _follow = {
     "active": False,
     "direction": "stop",
     "fallen": False,
+    "fallen_since": None,   # 넘어짐 확정 시각 (epoch 초)
+    "aspect": None,         # 앱이 보낸 사람 박스 가로/세로 (화면 픽셀 기준)
+    "tilt": None,           # 앱이 보낸 상체 기울기 (도, 0 = 서 있음)
     "last_ts": 0.0,
 }
 _follow_lock = threading.Lock()
@@ -833,6 +958,8 @@ def api_follow_toggle():
     with _follow_lock:
         _follow["active"] = not _follow["active"]
         active = _follow["active"]
+        if not active:
+            _follow.update(fallen=False, fallen_since=None, direction="stop")
     log_event(f"{'▶' if active else '⏹'} R2 카메라 감지 {'ON' if active else 'OFF'}")
     return jsonify({"ok": True, "active": active})
 
@@ -869,12 +996,237 @@ def api_follow_calibrate():
     if not state["rear"]["connected"]:
         return jsonify({"ok": False, "error": "R2 미연결"}), 400
     try:
-        _bolt_r2.reset_aim()
-        log_event("🧭 R2 heading 0° 리셋 (R1과 방향 맞춤)")
+        _bolt_r2.drive_control.reset_heading()
+        log_event("🧭 R2 heading 0° 리셋 (지금 정면 = 셀피 정면 기준)")
         return jsonify({"ok": True})
     except Exception as e:
         log_event(f"🧭 캘리브레이션 실패: {e}")
         return jsonify({"ok": False, "error": str(e)}), 500
+
+_AIM_LABEL = {"floor2": "R1", "rear": "R2", "floor1": "R3"}
+_aim_heading = {"floor2": 0, "rear": 0, "floor1": 0}
+
+def _set_aim_led(bolt):
+    """방향 보정용: 앞 LED 끄고 꼬리 LED만 파랗게 — 꼬리 반대쪽이 로봇 정면"""
+    if bolt is None:
+        return
+    try:
+        from spherov2.toy.bolt import BOLT as _B
+        L = _B.LEDs
+        bolt.multi_led_control.set_leds({
+            L.FRONT_RED: 0, L.FRONT_GREEN: 0, L.FRONT_BLUE: 0,
+            L.BACK_RED: 0, L.BACK_GREEN: 0, L.BACK_BLUE: 255,
+        })
+    except Exception as e:
+        log_event(f"  [LED 오류] {e}")
+
+@app.route("/api/aim", methods=["POST"])
+def api_aim():
+    """방향 보정 — 제자리 회전으로 로봇 정면을 R2 셀피 정면 방향에 맞춘 뒤 그 방향을 0°로 저장"""
+    data = flask_request.get_json(silent=True) or {}
+    key, action = data.get("robot"), data.get("action")
+    if key not in _aim_heading:
+        return jsonify({"ok": False, "error": "unknown robot"}), 400
+    label = _AIM_LABEL[key]
+    if action == "clear_trim":
+        with _state_lock:
+            state["aim_trim"][key] = 0
+        _save_settings()
+        log_event(f"🧭 {label} 자동 에임 보정값 지움")
+        return jsonify({"ok": True, "heading": _aim_heading[key]})
+    if not _active(key):
+        return jsonify({"ok": False, "error": f"{label} 미연결"}), 400
+    if state[key]["moving"]:
+        return jsonify({"ok": False, "error": f"{label} 주행 중 — 끝난 뒤 보정"}), 409
+    bolt = {"floor2": _bolt_2f, "rear": _bolt_r2, "floor1": _bolt_1f}[key]
+    try:
+        if action == "start":
+            _aim_heading[key] = 0
+            _set_aim_led(bolt)
+            if bolt is not None:
+                bolt.drive_control.roll_start(0, 0)
+            log_event(f"🧭 {label} 방향 보정 시작 — 꼬리 LED(파랑)를 셀피 정면의 반대쪽으로")
+        elif action == "rotate":
+            _aim_heading[key] = ((_aim_heading[key] + int(data.get("delta", 0)) + 180) % 360) - 180
+            if bolt is not None:
+                bolt.drive_control.roll_start(_aim_heading[key] % 360, 0)
+        elif action == "set":
+            if bolt is not None and hasattr(bolt.drive_control, "reset_heading"):
+                bolt.drive_control.reset_heading()
+            offset = _aim_heading[key]
+            _aim_heading[key] = 0
+            _set_led(bolt, 0, 255, 0)
+            if state["aim"][key]["status"] == "done" and offset:
+                # 자동 에임 결과에서 손으로 더 돌린 만큼 → 다음 자동 에임에 미리 더함
+                trim = ((state["aim_trim"][key] + offset + 180) % 360) - 180
+                with _state_lock:
+                    state["aim_trim"][key] = trim
+                _save_settings()
+                _set_aim_status(key, "done", f"미세 조정 {offset:+d}° → 보정값 {trim:+d}° 저장")
+                log_event(f"🧭 {label} 미세 조정 {offset:+d}° — 보정값 {trim:+d}° 기억 (다음 자동 에임에 적용)")
+            else:
+                log_event(f"🧭 {label} 방향 보정 완료 — 지금 정면 = 0° (셀피 정면 기준)")
+        elif action == "clear_trim":
+            with _state_lock:
+                state["aim_trim"][key] = 0
+            _save_settings()
+            log_event(f"🧭 {label} 자동 에임 보정값 지움")
+        else:
+            return jsonify({"ok": False, "error": "unknown action"}), 400
+    except Exception as e:
+        log_event(f"🧭 {label} 방향 보정 실패: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True, "heading": _aim_heading[key]})
+
+def _save_settings():
+    with _state_lock:
+        data = {**state["speeds"], "r2_delay": state["r2_delay"],
+                "turn_pause": state["turn_pause"], "aim_trim": state["aim_trim"],
+                "r2_dist_pct": state["r2_dist_pct"]}
+    try:
+        with open(SPEED_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except OSError as e:
+        log_event(f"⚠ 설정 저장 실패: {e}")
+
+@app.route("/api/speeds", methods=["POST"])
+def api_speeds():
+    """주행 속도 설정 (0~255) — 다음 주행부터 적용, 파일에 저장해 재시작 후에도 유지"""
+    data = flask_request.get_json(silent=True) or {}
+    new = dict(state["speeds"])
+    for k in DEFAULT_SPEEDS:
+        if k in data:
+            try:
+                v = int(data[k])
+            except (TypeError, ValueError):
+                return jsonify({"ok": False, "error": f"{_AIM_LABEL[k]} 속도가 숫자가 아님"}), 400
+            if not 1 <= v <= 255:
+                return jsonify({"ok": False, "error": f"{_AIM_LABEL[k]} 속도는 1~255"}), 400
+            new[k] = v
+    dist_pct = state["r2_dist_pct"]
+    if "r2_dist_pct" in data:
+        try:
+            dist_pct = round(float(data["r2_dist_pct"]))
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "R2 거리 보정이 숫자가 아님"}), 400
+        if not 50 <= dist_pct <= 200:
+            return jsonify({"ok": False, "error": "R2 거리 보정은 50~200%"}), 400
+    pause = state["turn_pause"]
+    if "turn_pause" in data:
+        try:
+            pause = round(float(data["turn_pause"]), 1)
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "꺾기 정지 시간이 숫자가 아님"}), 400
+        if not 0 <= pause <= 10:
+            return jsonify({"ok": False, "error": "꺾기 정지 시간은 0~10초"}), 400
+    delay = state["r2_delay"]
+    if "r2_delay" in data:
+        try:
+            delay = round(float(data["r2_delay"]), 1)
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "R2 출발 지연이 숫자가 아님"}), 400
+        if not 0 <= delay <= 30:
+            return jsonify({"ok": False, "error": "R2 출발 지연은 0~30초"}), 400
+    with _state_lock:
+        state["speeds"] = new
+        state["r2_delay"] = delay
+        state["turn_pause"] = pause
+        state["r2_dist_pct"] = dist_pct
+    _save_settings()
+    log_event(f"⚙ 주행 속도 — R1 {new['floor2']} · R2 {new['rear']} (출발 {delay:g}초 지연, 거리 {dist_pct:g}%) · R3 {new['floor1']} · 꺾기 전 {pause:g}초 정지 (다음 주행부터)")
+    return jsonify({"ok": True, "speeds": new, "r2_delay": delay, "turn_pause": pause, "r2_dist_pct": dist_pct})
+
+@app.route("/api/phone/heading", methods=["POST"])
+def api_phone_heading():
+    """앱이 0.5초마다 보내는 셀피 카메라 정면 방위"""
+    data = flask_request.get_json(silent=True) or {}
+    try:
+        az = float(data["azimuth"]) % 360
+        quality = max(0.0, min(1.0, float(data.get("quality", 0))))
+    except (KeyError, TypeError, ValueError):
+        return jsonify({"ok": False, "error": "azimuth 필요"}), 400
+    acc = data.get("accuracy")
+    with _state_lock:
+        state["phone"] = {"azimuth": round(az, 1), "quality": round(quality, 2),
+                          "accuracy": acc if isinstance(acc, int) else None, "ts": time.time()}
+    return jsonify({"ok": True})
+
+PHONE_HEADING_MAX_AGE = 5.0    # 초 — 이보다 오래된 폰 방위는 쓰지 않음
+PHONE_MIN_QUALITY     = 0.5    # 폰이 이보다 눕혀져 있으면 방위가 부정확
+NORTH_TIMEOUT_SEC     = 20.0
+# BOLT 북쪽 yaw와 폰 방위의 기준 차이 보정 — 0이면 로봇 정면이 셀피 방향 (현장 확인). 어긋나면 이 값만 조정
+AIM_AZIMUTH_OFFSET    = 0
+
+def _set_aim_status(key, status, msg):
+    with _state_lock:
+        state["aim"][key] = {"status": status, "msg": msg}
+
+def _auto_aim(key, azimuth):
+    """나침반 자동 에임: 북쪽 찾기 → (북쪽 yaw + 셀피 방위)로 제자리 회전 → 그 방향을 0°로 저장"""
+    label = _AIM_LABEL[key]
+    bolt = {"floor2": _bolt_2f, "rear": _bolt_r2, "floor1": _bolt_1f}[key]
+    try:
+        _set_aim_status(key, "running", "북쪽 찾는 중…")
+        _set_aim_led(bolt)
+        if bolt is not None and hasattr(bolt, "magnetometer_calibrate_to_north"):
+            got, evt = {}, threading.Event()
+            def _on_north(yaw):
+                got["yaw"] = yaw
+                evt.set()
+            bolt.add_magnetometer_north_yaw_notify_listener(_on_north)
+            try:
+                bolt.magnetometer_calibrate_to_north()
+                if not evt.wait(NORTH_TIMEOUT_SEC):
+                    raise TimeoutError(f"북쪽 찾기 {NORTH_TIMEOUT_SEC:.0f}초 초과")
+            finally:
+                bolt.remove_magnetometer_north_yaw_notify_listener(_on_north)
+            north = int(got["yaw"]) % 360
+        elif state["sim_mode"]:
+            time.sleep(2.0)
+            north = 0
+        else:
+            raise RuntimeError("나침반 미지원 로봇")
+        trim = state["aim_trim"][key]
+        target = int(round(north + azimuth + AIM_AZIMUTH_OFFSET + trim)) % 360
+        _set_aim_status(key, "running", f"셀피 방위 {azimuth:.0f}°로 회전 중…")
+        if bolt is not None:
+            bolt.drive_control.roll_start(target, 0)
+            time.sleep(1.5)
+            bolt.drive_control.roll_stop(target)
+            time.sleep(0.5)
+            if hasattr(bolt.drive_control, "reset_heading"):
+                bolt.drive_control.reset_heading()
+        _aim_heading[key] = 0
+        _set_led(bolt, 0, 255, 0)
+        msg = f"완료 · 북 {north}° + 셀피 {azimuth:.0f}°" + (f" + 보정 {trim:+d}°" if trim else "")
+        _set_aim_status(key, "done", msg)
+        log_event(f"🧭 {label} 나침반 자동 에임 {msg} → 지금 정면 = 0°")
+    except Exception as e:
+        _set_aim_status(key, "error", f"실패: {e}")
+        log_event(f"🧭 {label} 나침반 자동 에임 실패: {e}")
+
+@app.route("/api/aim/auto", methods=["POST"])
+def api_aim_auto():
+    """연결된 로봇을 폰 셀피 정면 방위에 맞춰 동시에 자동 에임"""
+    data = flask_request.get_json(silent=True) or {}
+    with _state_lock:
+        ph = dict(state["phone"])
+    if ph["azimuth"] is None or time.time() - ph["ts"] > PHONE_HEADING_MAX_AGE:
+        return jsonify({"ok": False, "error": "폰 방위 수신 없음 — 앱을 켜 두세요"}), 400
+    if ph["quality"] < PHONE_MIN_QUALITY:
+        return jsonify({"ok": False, "error": "폰이 너무 눕혀져 있음 — 세워서 셀피가 진행 방향을 보게"}), 400
+    keys = [k for k in (data.get("robots") or list(_AIM_LABEL)) if k in _AIM_LABEL]
+    started, skipped = [], []
+    for k in keys:
+        if not _active(k) or state[k]["moving"] or state["aim"][k]["status"] == "running":
+            skipped.append(_AIM_LABEL[k])
+            continue
+        threading.Thread(target=_auto_aim, args=(k, ph["azimuth"]), daemon=True).start()
+        started.append(_AIM_LABEL[k])
+    if not started:
+        return jsonify({"ok": False, "error": "에임할 로봇 없음 (미연결·주행 중)"}), 400
+    log_event(f"🧭 나침반 자동 에임 시작: {', '.join(started)} (셀피 방위 {ph['azimuth']:.0f}°)")
+    return jsonify({"ok": True, "started": started, "skipped": skipped, "azimuth": ph["azimuth"]})
 
 @app.route("/api/follow/direction", methods=["POST"])
 def api_follow_direction():
@@ -892,18 +1244,33 @@ def api_follow_direction():
     ratio = max(0.0, min(1.0, float(data.get("ratio", 0.5))))
     fallen = bool(data.get("fallen", False))
 
+    def _num(key):
+        try:
+            v = data.get(key)
+            return None if v is None else round(float(v), 2)
+        except (TypeError, ValueError):
+            return None
+    aspect, tilt = _num("aspect"), _num("tilt")
+
+    now = time.time()
     with _follow_lock:
         prev_dir, prev_fallen = _follow["direction"], _follow["fallen"]
         _follow["direction"] = direction
         _follow["fallen"] = fallen
-        _follow["last_ts"] = time.time()
+        _follow["aspect"] = aspect
+        _follow["tilt"] = tilt
+        _follow["last_ts"] = now
+        if fallen and not prev_fallen:
+            _follow["fallen_since"] = now
+        elif not fallen:
+            _follow["fallen_since"] = None
 
     if fallen and not prev_fallen:
-        log_event("⚠ R2 카메라: 넘어짐 감지 (3초 이상)")
+        metrics = f"w/h={aspect}" + (f", 기울기 {tilt:.0f}°" if tilt is not None else "")
+        log_event(f"🚨 R2 카메라: 대피자 넘어짐 감지 (3초 이상 · {metrics})")
     elif prev_fallen and not fallen:
         log_event("✅ R2 카메라: 넘어짐 해제")
-    if direction != prev_dir:
-        log_event(f"👁 R2 카메라 → {direction} (x={ratio:.2f})")
+    # 방향 변화는 초당 여러 번이라 로그에 남기지 않음 (주행 로그가 밀려남) — 대시보드 카메라 카드에 실시간 표시
     return jsonify({"direction": direction, "active": True})
 
 @app.route("/api/follow/preview", methods=["POST"])
@@ -997,8 +1364,11 @@ def follow_ws(ws):
 
 @app.route("/api/follow/status")
 def api_follow_status():
+    now = time.time()
     with _follow_lock:
         d = dict(_follow)
+    d["fallen_secs"] = round(now - d["fallen_since"], 1) if d["fallen_since"] else 0
+    d["stale_secs"]  = round(now - d["last_ts"], 1) if d["last_ts"] else None
     with _frame_lock:
         d["preview_ts"] = _frame_ts
         d["has_preview"] = _latest_frame is not None
@@ -1268,6 +1638,38 @@ header h1 { font-size: 18px; font-weight: 700; }
 .ex.resolved .eid { border-color: var(--ok); color: var(--ok); }
 .ex.resolved .est { color: var(--ok); }
 
+/* 방향 보정 */
+.aim-rows { display: grid; gap: 8px; }
+.aim-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.aim-row b { width: 26px; }
+.aim-row .aim-desc { font-size: 12px; color: var(--dim); flex: 1 1 220px; }
+.aim-row .btn { padding: 5px 10px; font-size: 12px; }
+.aim-auto { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+  padding: 8px 10px; margin-bottom: 10px; border: 1px solid var(--bdr); border-radius: 8px; background: var(--bg); }
+.aim-auto b { font: 15px 'JetBrains Mono', monospace; }
+.aim-st { font-weight: 700; margin-left: 6px; }
+.aim-st.running { color: var(--yel); } .aim-st.done { color: var(--grn); } .aim-st.error { color: var(--red); }
+.aim-trim { min-width: 64px; text-align: center; font: 12px 'JetBrains Mono', monospace; color: var(--yel); }
+.aim-deg { min-width: 44px; text-align: center; font: 13px 'JetBrains Mono', monospace; color: var(--txt); }
+
+/* 넘어짐 경보 */
+.fall-alert { display: none; position: sticky; top: 0; z-index: 50; align-items: center; gap: 12px;
+  padding: 10px 24px; background: #b91c1c; color: #fff; font-size: 14px; cursor: pointer;
+  box-shadow: 0 4px 14px rgba(185,28,28,.45); animation: fallPulse 1s ease-in-out infinite; }
+.fall-alert.on { display: flex; }
+.fall-alert .fa-ico { font-size: 20px; line-height: 1; }
+.fall-alert .fa-meta { margin-left: auto; font-size: 12px; opacity: .85; font-family: 'JetBrains Mono', monospace; }
+@keyframes fallPulse { 0%, 100% { background: #b91c1c; } 50% { background: #dc2626; } }
+.fall-badge { display: none; position: absolute; top: 8px; left: 8px; z-index: 2; background: #dc2626; color: #fff;
+  font-size: 12px; font-weight: 800; padding: 3px 9px; border-radius: 6px; animation: pulse 1s infinite; }
+.follow-preview-wrap.fallen { border: 3px solid #dc2626; box-shadow: 0 0 0 4px rgba(220,38,38,.25); }
+.follow-preview-wrap.fallen .fall-badge { display: block; }
+.bot.fall { border-color: var(--bad); background: rgba(248,113,113,.1); }
+.bot.fall .st { background: rgba(248,113,113,.2); color: var(--bad); }
+.robot.fallen .rb-dot { background: #dc2626; animation: rbPulseRed 1s infinite; }
+.robot.fallen .rb-tag { background: #b91c1c; }
+@keyframes rbPulseRed { 0% { box-shadow: 0 0 0 0 rgba(220,38,38,.75); } 100% { box-shadow: 0 0 0 16px rgba(220,38,38,0); } }
+
 footer { padding: 0 20px 24px; color: var(--ink3); font-size: 11px; line-height: 1.75; }
 footer b { color: var(--ink2); }
 kbd { background: var(--panel2); border: 1px solid var(--bdr); border-radius: 4px; padding: 1px 5px; font-size: 10.5px; }
@@ -1282,6 +1684,12 @@ kbd { background: var(--panel2); border: 1px solid var(--bdr); border-radius: 4p
   <span class="state-pill" id="statePill" title="시스템 상태">IDLE</span>
   <button class="hdr-btn" onclick="restartBroker()">↺ 브로커 재시작</button>
 </header>
+
+<div class="fall-alert" id="fallAlert" role="alert" onclick="document.getElementById('followWrapCard').scrollIntoView({behavior:'smooth'})">
+  <span class="fa-ico">⚠</span>
+  <span><b>대피자 넘어짐 감지</b> — R2 카메라 · <span id="fallSecs">0</span>초째 · 즉시 확인 필요</span>
+  <span class="fa-meta" id="fallMeta"></span>
+</div>
 
 <div class="ops">
   <div>
@@ -1458,9 +1866,58 @@ kbd { background: var(--panel2); border: 1px solid var(--bdr); border-radius: 4p
     <p class="connect-hint" id="connectHint">Sphero Edu 앱에서 각 볼트의 이름을 확인 후 입력하세요.</p>
   </div>
 
+  <!-- 주행 속도 -->
+  <div class="card connect-wrap">
+    <h2>주행 속도 (1~255) — 다음 주행부터 적용 · 재시작해도 유지</h2>
+    <div class="input-row">
+      <div class="field"><label>R1 앞 (2층 선두)</label><input id="spd_floor2" type="number" min="1" max="255"></div>
+      <div class="field"><label>R2 뒤 (2층 후방 · 폰 탑재)</label><input id="spd_rear" type="number" min="1" max="255"></div>
+      <div class="field"><label>R3 (1층)</label><input id="spd_floor1" type="number" min="1" max="255"></div>
+      <div class="field"><label>R2 출발 지연 (초)</label><input id="spd_r2delay" type="number" min="0" max="30" step="0.5"></div>
+      <div class="field"><label>꺾기 전 정지 (초)</label><input id="spd_turnpause" type="number" min="0" max="10" step="0.5"></div>
+      <div class="field"><label>R2 거리 보정 (%) — 덜 가면 올림</label><input id="spd_r2dist" type="number" min="50" max="200" step="1"></div>
+    </div>
+    <div class="btn-row" style="margin-top:0;">
+      <button class="btn btn-connect" onclick="saveSpeeds()">💾 속도 저장</button>
+      <button class="btn btn-reset" onclick="resetSpeeds()">기본값 (100 · 150 · 100 · 3초 · 1초 · 100%)</button>
+    </div>
+    <p class="connect-hint" id="speedHint">구간 시간은 R1(2층)·R3(1층) 속도로 계산. R2는 R1 시간표를 따르고 출력만 R2 값 — R2 실제 속도가 R1과 같아야 4m 간격 유지.</p>
+  </div>
+
+  <!-- 방향 보정 -->
+  <div class="card connect-wrap">
+    <h2>방향 보정 — 기준: R2 스마트폰 셀피 정면 = 0°</h2>
+    <div class="aim-auto">
+      <span>📱 폰 셀피 정면 방위 <b id="phoneAz">—</b> <span id="phoneAzNote" class="aim-desc"></span></span>
+      <button class="btn btn-connect" onclick="autoAim()">🧭 나침반 자동 에임 (연결된 로봇 전부)</button>
+    </div>
+    <div class="aim-rows">
+""" + "".join(
+    f'''      <div class="aim-row">
+        <b>{lbl}</b><span class="aim-desc">{desc} <span class="aim-st" id="aimSt_{key}"></span></span>
+        <button class="btn btn-reset" onclick="aim(\'{key}\',\'start\')">보정 시작</button>
+        <button class="btn btn-reset" onclick="aim(\'{key}\',\'rotate\',-15)">⟲ 15°</button>
+        <button class="btn btn-reset" onclick="aim(\'{key}\',\'rotate\',-5)">⟲ 5°</button>
+        <button class="btn btn-reset" onclick="aim(\'{key}\',\'rotate\',-1)">⟲ 1°</button>
+        <span class="aim-deg" id="aimDeg_{key}">—</span>
+        <button class="btn btn-reset" onclick="aim(\'{key}\',\'rotate\',1)">⟳ 1°</button>
+        <button class="btn btn-reset" onclick="aim(\'{key}\',\'rotate\',5)">⟳ 5°</button>
+        <button class="btn btn-reset" onclick="aim(\'{key}\',\'rotate\',15)">⟳ 15°</button>
+        <button class="btn btn-connect" onclick="aim(\'{key}\',\'set\')">✔ 0°로 저장</button>
+        <span class="aim-trim" id="aimTrim_{key}" title="자동 에임 때 더하는 보정값">보정 0°</span>
+        <button class="btn btn-reset" onclick="aim(\'{key}\',\'clear_trim\')" title="보정값 지우기">✕</button>
+      </div>
+''' for key, lbl, desc in [
+        ("rear",   "R2", "경로 출발점 · 셀피 카메라가 진행 방향(첫 구간)을 보게"),
+        ("floor2", "R1", "R2에서 경로 따라 4m 앞 · 셀피 정면과 같은 방향"),
+        ("floor1", "R3", "1층 출발점 · 1층 첫 구간(로비 쪽) 방향"),
+    ]) + r"""    </div>
+    <p class="connect-hint" id="aimHint">자동 에임 뒤 살짝 틀어졌으면: 그 로봇만 보정 시작 → ⟲/⟳ 1°·5°로 맞추고 0°로 저장 (나침반 재측정 없음). 수동: 보정 시작 → 꼬리 LED(파랑)가 켜짐. 화살표로 돌려 <b>꼬리 LED가 셀피 정면의 정반대</b>를 향하게(= 로봇 정면이 셀피 정면) 맞춘 뒤 0°로 저장. 경로의 모든 회전은 이 방향 기준.</p>
+  </div>
+
   <!-- Follow Mode 카드 -->
   <div class="follow-log-row">
-  <div class="card follow-wrap">
+  <div class="card follow-wrap" id="followWrapCard">
     <h2>R2 후방 (R1 경로 추종 · 카메라 감지)</h2>
     <div class="conn-row" style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">
       <div class="dot" id="dotR2"></div>
@@ -1477,7 +1934,8 @@ kbd { background: var(--panel2); border: 1px solid var(--bdr); border-radius: 4p
     <div class="path-steps" id="pathStepsR2"></div>
     <div class="sub-label" id="pathLabelR2" style="margin:6px 0 14px;">대기 중</div>
     <div class="follow-inner">
-      <div class="follow-preview-wrap">
+      <div class="follow-preview-wrap" id="followPreviewWrap">
+        <span class="fall-badge">⚠ 넘어짐</span>
         <img class="follow-preview" id="followPreview" alt="카메라 프리뷰">
         <div class="follow-preview-placeholder" id="followPlaceholder">
           <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -1490,6 +1948,7 @@ kbd { background: var(--panel2); border: 1px solid var(--bdr); border-radius: 4p
       <div>
         <div class="follow-dir" id="followDir">■</div>
         <div class="follow-info" id="followInfo">대기 중</div>
+        <div class="follow-info" id="followMetrics" title="넘어짐 판정: w/h > 1.0 또는 기울기 > 60° 가 3초 지속">w/h — · 기울기 —</div>
         <div class="btn-row" style="margin-top:14px;">
           <button class="btn btn-follow-on" id="btnFollowToggle" onclick="toggleFollow()">▶ 감지 ON</button>
         </div>
@@ -1517,16 +1976,16 @@ kbd { background: var(--panel2); border: 1px solid var(--bdr); border-radius: 4p
 
 <script>
 const PATH_2F = """ + json.dumps([
-    {"step": i+1, "char": char, "speed": spd, "heading": hdg, "duration": dur}
+    {"step": i+1, "char": char, "speed": spd, "heading": hdg, "duration": dur, "meters": round(dur * DRIVE_MPS, 2) if spd > 0 else 0}
     for i, (spd, hdg, dur, char) in enumerate(EVAC_PATH_2F)
 ]) + r""";
 const PATH_1F = """ + json.dumps([
-    {"step": i+1, "char": char, "speed": spd, "heading": hdg, "duration": dur}
+    {"step": i+1, "char": char, "speed": spd, "heading": hdg, "duration": dur, "meters": round(dur * DRIVE_MPS, 2) if spd > 0 else 0}
     for i, (spd, hdg, dur, char) in enumerate(EVAC_PATH_1F)
 ]) + r""";
 const PATH_R2 = """ + json.dumps([
-    {"step": i+1, "char": char, "speed": spd, "heading": hdg, "duration": dur}
-    for i, (spd, hdg, dur, char) in enumerate(_r2_path(EVAC_PATH_2F))
+    {"step": i+1, "char": char, "speed": spd, "heading": hdg, "duration": dur, "meters": round(dur * DRIVE_MPS, 2) if spd > 0 else 0}
+    for i, (spd, hdg, dur, char) in enumerate(EVAC_PATH_R2)
 ]) + r""";
 const TARGET_MODES = """ + json.dumps(TARGET_MODES, ensure_ascii=False, indent=1) + r""";
 const DISASTERS    = """ + json.dumps(DISASTERS, ensure_ascii=False, indent=1) + r""";
@@ -1610,12 +2069,13 @@ function renderFlow(d) {
     `Sphero 속도 ×${tm.mps}, 구간 시간 ÷${tm.mps}로 같은 거리 유지 (다음 주행부터 적용).`;
 
   document.getElementById('bots').innerHTML = ROBOTS.map(r => {
-    const st = robotPhase(r, d);
+    const fall = r.id === 'R2' && followFallen;
+    const st = fall ? '대피자 넘어짐' : robotPhase(r, d);
     const online = r.key && (d[r.key].connected || d.sim_mode);
     const conn = !r.key ? '하드웨어 없음' : d[r.key].connected ? '연결됨' : d.sim_mode ? 'SIM' : '미연결';
     const lit = online && st !== 'IDLE';
     const ballStyle = lit ? `color:${r.color};box-shadow:inset 0 0 0 1px ${r.color}` : online ? 'color:#6b7785' : '';
-    return `<div class="bot ${st.toLowerCase()}">
+    return `<div class="bot ${fall ? 'fall' : st.toLowerCase()}">
       <div class="rball" style="${ballStyle}">${r.id}</div>
       <div style="min-width:0"><div class="n">${r.name} <span>· ${conn}</span></div><div class="s">${r.role}</div></div>
       <div class="st">${st}</div></div>`;
@@ -1642,6 +2102,105 @@ function renderFlow(d) {
   });
 }
 
+const ACC_LABEL = ['불안정 — 폰으로 8자를 그려 보정', '정확도 낮음', '정확도 보통', '정확도 높음'];
+function renderAim(d) {
+  const ph = d.phone || {};
+  const fresh = ph.azimuth != null && ph.age != null && ph.age < 5;
+  document.getElementById('phoneAz').textContent = fresh ? Math.round(ph.azimuth) + '°' : '—';
+  document.getElementById('phoneAzNote').textContent =
+    !fresh ? '앱에서 방위 수신 없음' :
+    ph.quality < 0.5 ? '폰을 세워 주세요 (셀피가 진행 방향을 보게)' :
+    (ACC_LABEL[ph.accuracy] || '');
+  Object.entries(d.aim_trim || {}).forEach(([k, t]) => {
+    const el = document.getElementById('aimTrim_' + k);
+    if (el) el.textContent = '보정 ' + (t > 0 ? '+' : '') + t + '°';
+  });
+  Object.entries(d.aim || {}).forEach(([k, a]) => {
+    const el = document.getElementById('aimSt_' + k);
+    if (!el) return;
+    el.textContent = a.msg || '';
+    el.className = 'aim-st ' + (a.status || '');
+    if (a.status === 'done') document.getElementById('aimDeg_' + k).textContent = '0° ✔';
+  });
+}
+function autoAim() {
+  const hint = document.getElementById('aimHint');
+  fetch('/api/aim/auto', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+    .then(r => r.json())
+    .then(j => {
+      hint.style.color = j.ok ? '' : 'var(--red)';
+      hint.textContent = j.ok
+        ? `🧭 자동 에임 시작: ${j.started.join(', ')} — 로봇이 제자리에서 돌며 북쪽을 찾습니다 (셀피 방위 ${Math.round(j.azimuth)}°)`
+          + (j.skipped.length ? ` · 건너뜀: ${j.skipped.join(', ')}` : '')
+        : '⚠ ' + j.error;
+    })
+    .catch(e => { hint.textContent = '⚠ 요청 실패: ' + e; hint.style.color = 'var(--red)'; });
+}
+
+const SPEED_REF = """ + str(SPEED_REF) + r""";
+const DEFAULT_SPEEDS = """ + json.dumps(DEFAULT_SPEEDS) + r""";
+let speeds = Object.assign({}, DEFAULT_SPEEDS);
+const SPEED_KEYS = ['floor2', 'rear', 'floor1'];
+const DEFAULT_R2_DELAY = """ + str(DEFAULT_R2_DELAY_SEC) + r""";
+const DEFAULT_TURN_PAUSE = """ + str(DEFAULT_TURN_PAUSE_SEC) + r""";
+const DEFAULT_R2_DIST = """ + str(DEFAULT_R2_DIST_PCT) + r""";
+function renderSpeeds(d) {
+  if (!d.speeds) return;
+  speeds = d.speeds;
+  SPEED_KEYS.forEach(k => {
+    const el = document.getElementById('spd_' + k);
+    if (!el.dataset.touched) el.value = d.speeds[k];
+  });
+  const dl = document.getElementById('spd_r2delay');
+  if (!dl.dataset.touched && d.r2_delay != null) dl.value = d.r2_delay;
+  const tp = document.getElementById('spd_turnpause');
+  if (!tp.dataset.touched && d.turn_pause != null) tp.value = d.turn_pause;
+  const rd = document.getElementById('spd_r2dist');
+  if (!rd.dataset.touched && d.r2_dist_pct != null) rd.value = d.r2_dist_pct;
+}
+function postSpeeds(body) {
+  const hint = document.getElementById('speedHint');
+  fetch('/api/speeds', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    .then(r => r.json())
+    .then(j => {
+      if (!j.ok) { hint.textContent = '⚠ ' + j.error; hint.style.color = 'var(--red)'; return; }
+      SPEED_KEYS.forEach(k => { const el = document.getElementById('spd_' + k); delete el.dataset.touched; el.value = j.speeds[k]; });
+      const dl = document.getElementById('spd_r2delay'); delete dl.dataset.touched; dl.value = j.r2_delay;
+      const tp = document.getElementById('spd_turnpause'); delete tp.dataset.touched; tp.value = j.turn_pause;
+      const rd = document.getElementById('spd_r2dist'); delete rd.dataset.touched; rd.value = j.r2_dist_pct;
+      const t2 = (PATH_2F.reduce((a, p) => a + p.duration, 0) * SPEED_REF / j.speeds.floor2).toFixed(1);
+      const t1 = (PATH_1F.reduce((a, p) => a + p.duration, 0) * SPEED_REF / j.speeds.floor1).toFixed(1);
+      hint.style.color = '';
+      hint.textContent = `✔ 저장됨 — R1 ${j.speeds.floor2} · R2 ${j.speeds.rear} (${j.r2_delay}초 뒤 출발, 거리 ${j.r2_dist_pct}%) · R3 ${j.speeds.floor1} · 꺾기 전 ${j.turn_pause}초 정지 · 예상 2층 ${t2}초 / 1층 ${t1}초 (일반 모드)`;
+      update();
+    })
+    .catch(e => { hint.textContent = '⚠ 요청 실패: ' + e; hint.style.color = 'var(--red)'; });
+}
+function saveSpeeds() {
+  const body = {};
+  SPEED_KEYS.forEach(k => { body[k] = parseInt(document.getElementById('spd_' + k).value, 10); });
+  body.r2_delay = parseFloat(document.getElementById('spd_r2delay').value);
+  body.turn_pause = parseFloat(document.getElementById('spd_turnpause').value);
+  body.r2_dist_pct = parseFloat(document.getElementById('spd_r2dist').value);
+  postSpeeds(body);
+}
+function resetSpeeds() { postSpeeds(Object.assign({}, DEFAULT_SPEEDS, { r2_delay: DEFAULT_R2_DELAY, turn_pause: DEFAULT_TURN_PAUSE, r2_dist_pct: DEFAULT_R2_DIST })); }
+SPEED_KEYS.concat(['r2delay', 'turnpause', 'r2dist']).forEach(k => document.getElementById('spd_' + k)
+  .addEventListener('input', e => { e.target.dataset.touched = '1'; }));
+
+function aim(robot, action, delta) {
+  const hint = document.getElementById('aimHint');
+  fetch('/api/aim', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ robot, action, delta: delta || 0 }) })
+    .then(r => r.json())
+    .then(j => {
+      if (!j.ok) { hint.textContent = '⚠ ' + j.error; hint.style.color = 'var(--red)'; return; }
+      hint.style.color = '';
+      document.getElementById('aimDeg_' + robot).textContent = action === 'set' ? '0° ✔' : j.heading + '°';
+    })
+    .catch(e => { hint.textContent = '⚠ 요청 실패: ' + e; hint.style.color = 'var(--red)'; });
+}
+
 function copyAppUrl() {
   const url = document.getElementById('appUrl').textContent;
   const done = () => {
@@ -1657,6 +2216,24 @@ function copyAppUrl() {
     try { document.execCommand('copy'); done(); } catch (e) {}
     ta.remove();
   }
+}
+
+function fallMetricText(f) {
+  return `w/h ${f.aspect == null ? '—' : f.aspect.toFixed(2)} · 기울기 ${f.tilt == null ? '—' : Math.round(f.tilt) + '°'}`;
+}
+function renderFall(f) {
+  const was = followFallen;
+  followFallen = !!(f.active && f.fallen);
+  document.getElementById('fallAlert').classList.toggle('on', followFallen);
+  document.getElementById('followPreviewWrap').classList.toggle('fallen', followFallen);
+  document.getElementById('followMetrics').textContent = f.active ? fallMetricText(f) : '';
+  if (followFallen) {
+    document.getElementById('fallSecs').textContent = Math.floor(f.fallen_secs || 0);
+    const stale = f.stale_secs != null && f.stale_secs > 3;
+    document.getElementById('fallMeta').textContent =
+      stale ? `카메라 신호 ${Math.floor(f.stale_secs)}초 끊김` : fallMetricText(f);
+  }
+  if (was !== followFallen) update();
 }
 
 function toggleFloorplan() {
@@ -1681,52 +2258,63 @@ function floorplanTab(floor, manual) {
 }
 
 // 도면 이미지 기준 % 좌표 (도면 PNG의 파란 스피로 경로 꺾임점)
-const FP_W = 1150, FP_H = 740;
-const ROUTE_2F = [[66.1,44.7],[64.1,45.3],[64.1,60.8],[54.6,60.8],[54.6,89.6]];
+const ROUTE_2F = [[64.1,60.8],[54.6,60.8],[54.6,89.6]];   // ROUTE_2F_M 구간과 1:1 (전체: [66.1,44.7],[64.1,45.3] 앞에 추가)
 const ROUTE_1F = [[67.5,45.0],[56.1,45.0],[56.1,18.5]];
-function pointOnRoute(route, t) {
-  t = Math.max(0, Math.min(1, t));
-  const seg = [];
-  let total = 0;
-  for (let i = 1; i < route.length; i++) {
-    const dx = (route[i][0] - route[i-1][0]) * FP_W, dy = (route[i][1] - route[i-1][1]) * FP_H;
-    const len = Math.hypot(dx, dy);
-    seg.push(len); total += len;
-  }
-  let d = t * total;
-  for (let i = 0; i < seg.length; i++) {
-    if (d <= seg[i] || i === seg.length - 1) {
-      const r = seg[i] ? Math.min(1, d / seg[i]) : 0;
+const ROUTE_2F_LEN_M = """ + json.dumps([m for _, m in ROUTE_2F_M]) + r""";
+const ROUTE_1F_LEN_M = """ + json.dumps([m for _, m in ROUTE_1F_M]) + r""";
+const FOLLOW_GAP_M = """ + str(FOLLOW_GAP_M) + r""";
+// 경로 출발점에서 m미터 지점의 도면 좌표 — 구간(꺾임점) 단위로 도면 실측 거리를 따라감
+function pointAtMeters(route, lens, m) {
+  m = Math.max(0, m);
+  for (let i = 0; i < lens.length; i++) {
+    if (m <= lens[i] || i === lens.length - 1) {
+      const r = lens[i] ? Math.min(1, m / lens[i]) : 0;
       return [route[i][0] + (route[i+1][0] - route[i][0]) * r,
               route[i][1] + (route[i+1][1] - route[i][1]) * r];
     }
-    d -= seg[i];
+    m -= lens[i];
   }
 }
-// leadSteps: R2처럼 R1 출발점까지 먼저 달리는 간격 구간 수
-function placeRobot(id, s, route, leadSteps) {
+let modeFactor = 1;
+// offsetM: 이 로봇이 경로 출발점에서 몇 m 앞에서 출발하는지 (R1 = 4m, R2·R3 = 0)
+function placeRobot(id, s, route, lens, path, offsetM, timeScale) {
   const el = document.getElementById(id);
-  let t = 0, cls = 'idle', word = '대기';
+  let m = offsetM, glide = 1.4, cls = 'idle', word = '대기';
   if (!s.connected && !simMode && !s.moving) { cls = ''; word = '미연결'; }
   if (s.moving) {
-    const n = Math.max(1, s.total_steps - leadSteps);
-    t = Math.max(0, (s.step || 0) - leadSteps) / n;
+    const k = s.step || 0;
+    m = offsetM + path.slice(0, k).reduce((a, p) => a + (p.meters || 0), 0);   // 현재 구간 끝 지점
+    const cur = path[k - 1];
+    if (cur && cur.duration > 0) glide = cur.duration * timeScale / modeFactor;   // 실제 주행 시간만큼 이동
     cls = 'moving'; word = '주행';
   } else if (s.done) {
-    t = 1; cls = 'done'; word = '도착';
+    m = offsetM + path.reduce((a, p) => a + (p.meters || 0), 0);
+    cls = 'done'; word = '도착';
   }
-  const [x, y] = pointOnRoute(route, t);
+  const [x, y] = pointAtMeters(route, lens, m);
+  if (el.dataset.m !== String(m)) {
+    el.style.transition = `left ${glide}s linear, top ${glide}s linear`;
+    el.dataset.m = String(m);
+  }
   el.style.left = x + '%';
   el.style.top  = y + '%';
   el.className  = 'robot ' + cls + (id === 'robotR2' ? ' rb-rear' : '');
   el.querySelector('.rb-tag').textContent = el.querySelector('.rb-dot').textContent + ' ' + word;
 }
 let simMode = false;
+let followFallen = false;
 function updateFloorplan(d) {
   simMode = !!d.sim_mode;
-  placeRobot('robotR1', d.floor2, ROUTE_2F, 0);
-  placeRobot('robotR2', d.rear,   ROUTE_2F, 1);
-  placeRobot('robotR3', d.floor1, ROUTE_1F, 0);
+  modeFactor = (TARGET_MODES[d.target] || {}).mps || 1;
+  const sp = d.speeds || DEFAULT_SPEEDS;
+  placeRobot('robotR1', d.floor2, ROUTE_2F, ROUTE_2F_LEN_M, PATH_2F, FOLLOW_GAP_M, SPEED_REF / sp.floor2);
+  placeRobot('robotR2', d.rear,   ROUTE_2F, ROUTE_2F_LEN_M, PATH_R2, 0, SPEED_REF / sp.floor2 * (d.r2_dist_pct || 100) / 100);
+  placeRobot('robotR3', d.floor1, ROUTE_1F, ROUTE_1F_LEN_M, PATH_1F, 0, SPEED_REF / sp.floor1);
+  if (followFallen) {
+    const r2 = document.getElementById('robotR2');
+    r2.classList.add('fallen');
+    r2.querySelector('.rb-tag').textContent = 'R2 ⚠ 넘어짐 감지';
+  }
   // 주행 중인 층을 자동으로 보여줌 (사용자가 탭을 누르면 자동 전환 중단)
   if (!fpManual) {
     if (d.floor1.moving && fpFloor !== '1f') floorplanTab('1f', false);
@@ -1839,18 +2427,20 @@ function update() {
       document.getElementById('movingBadge').textContent = mov ? '🏃 이동 중' : '';
 
       // 2F path steps
-      function renderSteps(containerId, path, curStep) {
+      function renderSteps(containerId, path, curStep, timeScale) {
         const el = document.getElementById(containerId);
         el.innerHTML = '';
         path.forEach(p => {
           const sp = document.createElement('div');
           sp.className = 'step-box' + (curStep === p.step ? ' active' : curStep > p.step ? ' done' : '');
-          sp.textContent = `${p.char} ${p.duration > 0 ? p.duration + 's' : '정지'}`;
-          sp.title = `step${p.step}: 속도${p.speed} 방향${p.heading}°`;
+          sp.textContent = `${p.char} ${p.duration > 0 ? (p.duration * timeScale).toFixed(1) + 's' : '정지'}`;
+          sp.title = `step${p.step}: ${p.meters}m 방향${p.heading}°`;
           el.appendChild(sp);
         });
       }
-      renderSteps('pathSteps2f', PATH_2F, d.floor2.step || 0);
+      const ts2 = SPEED_REF / (d.speeds ? d.speeds.floor2 : SPEED_REF);
+      const ts1 = SPEED_REF / (d.speeds ? d.speeds.floor1 : SPEED_REF);
+      renderSteps('pathSteps2f', PATH_2F, d.floor2.step || 0, ts2);
       const pct2f = d.floor2.total_steps > 0
         ? Math.round((d.floor2.step || 0) / d.floor2.total_steps * 100) : 0;
       document.getElementById('pathProgress2f').style.width = pct2f + '%';
@@ -1859,7 +2449,7 @@ function update() {
         : ((d.floor2.step || 0) === 0 ? '대기 중' : '완료');
 
       // 1F path steps
-      renderSteps('pathSteps', PATH_1F, d.floor1.step);
+      renderSteps('pathSteps', PATH_1F, d.floor1.step, ts1);
       const pct = d.floor1.total_steps > 0
         ? Math.round(d.floor1.step / d.floor1.total_steps * 100) : 0;
       document.getElementById('pathProgress').style.width = pct + '%';
@@ -1872,13 +2462,15 @@ function update() {
       document.getElementById('dotR2').className   = 'dot' + (r2.connected ? ' on' : '');
       document.getElementById('connR2').textContent = r2.connected ? '연결됨' : '연결 안됨';
       document.getElementById('batR2Txt').textContent = `배터리 ${r2.battery}%`;
-      renderSteps('pathStepsR2', PATH_R2, r2.step || 0);
+      renderSteps('pathStepsR2', PATH_R2, r2.step || 0, ts2 * (d.r2_dist_pct || 100) / 100);
       document.getElementById('pathLabelR2').textContent = r2.moving
         ? `R1 경로 추종 중: ${r2.step} / ${r2.total_steps}`
         : ((r2.step || 0) === 0 ? '대기 중' : '완료');
 
       updateFloorplan(d);
       renderFlow(d);
+      renderAim(d);
+      renderSpeeds(d);
       document.getElementById('appUrl').textContent =
         `http://${d.server_ip}:${location.port || (location.protocol === 'https:' ? 443 : 80)}`;
 
@@ -1934,6 +2526,7 @@ function toggleFollow() {
 setInterval(() => {
   fetch('/api/follow/status').then(r => r.json()).then(f => {
     renderFollow(f.active);
+    renderFall(f);
     const dir  = document.getElementById('followDir');
     const info = document.getElementById('followInfo');
     if (!f.active) { dir.textContent = '■'; info.textContent = '감지 꺼짐'; dir.style.color = ''; return; }
