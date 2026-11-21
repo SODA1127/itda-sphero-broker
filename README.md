@@ -1,13 +1,38 @@
 # 잇다 (ITDA) — Sphero 재난 대피 안내 로봇 브로커
 
-ISE103 융합시스템창의설계 팀 프로젝트 (4조 잇다) — Sphero 로봇 2대(R1·R2)와 Android 앱을 연결하는 Flask 브로커 서버.
+ISE103 융합시스템창의설계 팀 프로젝트 (4조 잇다).
+Sphero BOLT 로봇(R1·R2·R3)과 Android 앱을 연결하는 Flask 브로커 서버와 웹 대시보드.
+팔달관 2층 복도 → 계단 → 1층 로비 → 비상구로 대피자를 안내한다.
+
+![대시보드 — 화재 발생, 2층 R1·R2 유도 중](docs/dashboard-guiding.png)
+
+## 대시보드
+
+| 지진 · 시각장애 모드 · 1층 인수인계 | 전체 화면 (대피 완료) |
+|---|---|
+| ![1층 인수인계](docs/dashboard-handoff.png) | ![전체 화면](docs/dashboard-full.png) |
+
+- **대피 흐름 타임라인**: IDLE → ARMED → GUIDING → HANDOFF → COMPLETE. 실제 주행 진행에 맞춰 바뀐다.
+- **재난 트리거**: 화재(서버 신호) · 지진(가속도계) · 정전(조도 센서) · 상황 해제. 키보드 `1` `2` `3` `0`.
+  - 지진은 진동이 멈추고 2초 뒤 유도를 시작한다. R1을 2.5G 이상 흔들어도 지진으로 처리한다.
+  - 상황 해제를 누르면 주행 중인 로봇이 바로 멈춘다.
+- **안내 대상 모드**: 일반 1.0 · 시각장애 0.6 · 노인 0.6 · 어린이 0.8 m/s.
+  Sphero 속도를 비율만큼 낮추고 구간 시간을 늘려 같은 거리를 간다.
+- **로봇 상태 R1–R4**: 로봇별 단계와 연결 상태. R4(예비)는 하드웨어 없이 표시만 한다.
+- **팔달관 도면 위 로봇 위치**: 1·2층 도면의 스피로 경로 위에 R1·R2·R3 위치를 표시한다.
+  위치는 경로 단계로 추정한 값이다. 주행 중인 층의 탭으로 자동 전환된다.
+- **신호 전달 경로**: 재난 트리거 → 중계기 → BLE 게이트웨이 → 로봇. 정전 때는 네트워크가 끊긴 상태로 표시한다.
+- **예외 처리 E1–E5**: E4(명령 실패)·E5(로봇 미연결)는 주행 중 자동 표시. 나머지는 눌러서 시연용으로 발생시킨다(표시·로그만).
+- **R2 카메라 감지**: Android 앱이 보낸 대피자 움직임·넘어짐을 표시한다.
 
 ## 구성
 
 | 파일 | 설명 |
 |------|------|
-| `sphero_broker.py` | Flask 브로커 서버 (BLE 연결, 경로 주행, 카메라 감지, 대시보드) |
-| `재난대피로봇_시연/index.html` | 웹 대시보드 (내장) |
+| `sphero_broker.py` | Flask 브로커 서버 (BLE 연결, 경로 주행, 카메라 감지, 대시보드 내장) |
+| `floorplan_1f.png`, `floorplan_2f.png` | 대시보드용 팔달관 1·2층 도면 |
+| `팔달관_도면.pdf`, `팔달관_도면.html` | 층별 도면 원본 (실측 기입용) |
+| `재난대피로봇_시연/index.html` | 단독 시연 페이지 (서버 없이 애니메이션만) |
 | `동작 알고리즘 개선안 v2.md` | 알고리즘 설계 문서 |
 | `Sphero 제약 시트.md` | Sphero BOLT 제약사항 정리 |
 
@@ -15,32 +40,46 @@ ISE103 융합시스템창의설계 팀 프로젝트 (4조 잇다) — Sphero 로
 
 ```bash
 # 의존성 설치
-pip3.9 install flask spherov2
+pip3.9 install flask flask-sock spherov2
 
-# 브로커 실행 (포트 5001)
+# 실제 BLE 연결 (포트 5001)
 python3.9 sphero_broker.py
 
-# 백그라운드 실행
-nohup python3.9 sphero_broker.py > /tmp/broker.log 2>&1 &
+# Sphero 없이 시뮬레이션 — R1·R2·R3 모두 가상 주행
+python3.9 sphero_broker.py --sim
+
+# 포트 변경
+python3.9 sphero_broker.py --sim --port 5002
 ```
 
-## 주요 기능
+대시보드: http://localhost:5001
 
-- **R1 (2층 Sphero)**: 2층 대피 경로(EVAC_PATH_2F) 자동 주행
-- **R2 (후방 Sphero)**: R1과 동시 출발, R2_GAP_SEC(기본 2초) 뒤 R1 경로 그대로 추종
-- **R3 (1층 Sphero)**: 1층 대피 경로(EVAC_PATH_1F) 주행
-- **카메라 감지**: R2 트롤리 Android 앱에서 대피자 움직임·넘어짐 감지 → 대시보드 표시
-- **SIM 모드**: BLE 없이 `SIM=1 python3.9 sphero_broker.py` 로 테스트
+## 주행 흐름
+
+1. 재난 신호 수신 → **ARMED**
+2. R1(선두)과 R2(후방)가 2층 경로(`EVAC_PATH_2F`)를 동시에 주행 → **GUIDING**.
+   R2는 `R2_GAP_SEC`(기본 2초)만큼 먼저 달려 R1 출발점에 온 뒤 R1 경로를 그대로 따라간다.
+3. R1이 계단 앞에 도착하면 중계기가 R3에 출발 명령 → **HANDOFF**
+4. R3이 1층 경로(`EVAC_PATH_1F`)로 비상구까지 유도 → **COMPLETE**
+
+경로 헤딩은 시연 장소에서 calibrate한 뒤 `EVAC_PATH_2F`, `EVAC_PATH_1F`에서 수정한다.
 
 ## API 엔드포인트
 
 | 메서드 | 경로 | 설명 |
 |--------|------|------|
 | `GET` | `/` | 웹 대시보드 |
-| `GET` | `/api/status` | Sphero 연결·배터리·경로 상태 |
+| `GET` | `/api/status` | 연결·배터리·경로·대피 단계·예외 상태 |
 | `POST` | `/api/connect` | BLE 연결 시작 |
-| `POST` | `/api/trigger` | 대피 경로 주행 시작 |
-| `POST` | `/api/reset` | 상태 초기화 |
+| `POST` | `/api/disconnect` | BLE 연결 해제 |
+| `POST` | `/api/restart` | 브로커 재시작 |
+| `POST` | `/api/trigger` | 대피 경로 주행 시작 (화재) |
+| `POST` | `/api/disaster` | `{"type": "fire"\|"quake"\|"black"\|"clear"}` 재난 발생·해제 |
+| `POST` | `/api/target` | `{"mode": "normal"\|"blind"\|"elder"\|"child"}` 안내 대상 모드 |
+| `POST` | `/api/exception` | `{"id": "E1".."E5"}` 예외 수동 발생 |
+| `POST` | `/api/reset` | 상태 초기화 (주행 중단) |
+| `GET` | `/floorplan` | 층별 도면 PDF |
+| `GET` | `/floorplan-img/<1f\|2f>` | 층별 도면 PNG |
 | `POST` | `/api/follow/toggle` | R2 카메라 감지 ON/OFF |
 | `POST` | `/api/follow/direction` | 카메라 방향·넘어짐 수신 |
 | `POST` | `/api/follow/preview` | JPEG 프리뷰 수신 |

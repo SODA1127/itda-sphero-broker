@@ -39,6 +39,7 @@ SPHERO_R2_NAME  = ""          # 2층 후방 Sphero BLE 이름 (R2, 스마트폰 
 # (간격 ≈ R1 첫 구간 속도 × 이 시간 — 현장에서 실측 후 조정)
 R2_GAP_SEC      = 2.0
 FLASK_PORT      = 5001
+FLOORPLAN_PDF   = os.path.join(os.path.dirname(__file__), "팔달관_도면.pdf")
 SHAKE_THRESHOLD = 2.5          # G  — 이 이상이면 흔들기 신호로 판정
 SIGNAL_COOLDOWN = 10           # 초  — 한 번 신호 후 재차단 시간
 
@@ -58,6 +59,31 @@ EVAC_PATH_1F = [
     (0,    0,  0.0, "!"),   # 정지 (비상구 도달)
 ]
 
+# 안내 대상 모드 — mps 비율로 Sphero 속도를 낮추고 지속 시간을 늘려 같은 거리를 간다
+TARGET_MODES = {
+    "normal": {"label": "일반",     "icon": "🚶", "mps": 1.0, "led": "표준 화살표",     "voice": "기본 안내 1회"},
+    "blind":  {"label": "시각장애", "icon": "🦯", "mps": 0.6, "led": "고휘도 단색 점멸", "voice": "상황·방향 반복 안내"},
+    "elder":  {"label": "노인",     "icon": "🧓", "mps": 0.6, "led": "대형 화살표",     "voice": "주기적으로 또렷하게"},
+    "child":  {"label": "어린이",   "icon": "🧒", "mps": 0.8, "led": "친근한 캐릭터",   "voice": "쉽고 짧은 문구"},
+}
+DISASTERS = {
+    "fire":  {"label": "화재", "icon": "🔥", "src": "서버 신호",
+              "note": "발화실 번호를 받는 즉시 시작 (시연: 대시보드 입력으로 수신반 신호 대체)"},
+    "quake": {"label": "지진", "icon": "🌍", "src": "가속도계 감지",
+              "note": "흔들리는 동안 음성 안내만 — 진동이 멈추고 2초 뒤 유도 시작"},
+    "black": {"label": "정전", "icon": "💡", "src": "조도 센서 감지",
+              "note": "조도 10 lux 미만 3초 지속 시 시작 — 네트워크 없이 저장 경로로 자립 유도"},
+}
+EXCEPTIONS = {
+    "E1": "센서 오인식 — 3초 미만 조도 하강 무시",
+    "E2": "경로 이탈 — IR 2초 끊기면 전 로봇 일시정지",
+    "E3": "장애물 충돌 — 0.3m 후진 후 회피 재시도",
+    "E4": "통신 단절 — 저장 경로로 계속 유도",
+    "E5": "로봇 고장 — 예비 로봇이 역할 넘겨받아 투입",
+}
+QUAKE_SETTLE_SEC = 2.0
+EXCEPTION_SHOW_SEC = 4.0
+
 # ── 공유 상태 ─────────────────────────────────────────────────────────────────
 state = {
     "floor2": {"connected": False, "signal": False, "battery": 0,
@@ -68,6 +94,11 @@ state = {
     "rear":   {"connected": False, "moving": False, "step": 0,
                "total_steps": len(EVAC_PATH_2F) + 1, "battery": 0},
     "trigger_count": 0,
+    "phase": "idle",            # idle → armed → guiding → handoff → complete
+    "disaster": None,           # fire / quake / black
+    "target": "normal",
+    "exceptions": {},           # "E4": "triggered" | "resolved"
+    "latency": None,            # 트리거 → 선두 출발 (초)
     "log": [],
     "sim_mode": False,
     "names": {"floor2": SPHERO_2F_NAME, "floor1": SPHERO_1F_NAME, "rear": SPHERO_R2_NAME},
@@ -90,34 +121,75 @@ _bolt_r2   = None
 _triggered = False
 _trigger_lock    = threading.Lock()
 _broker_stop_evt = threading.Event()
+_trigger_ts      = 0.0
+_last_shake_ts   = 0.0
+_run_gen         = 0    # 트리거·리셋마다 증가 — 이전 세대 주행 스레드는 스스로 멈춘다
 
-def trigger_signal(source: str = "unknown"):
-    """2F Sphero 신호 수신 → 1F Sphero 대피 경로 시작"""
-    global _triggered
+def _active(key: str) -> bool:
+    """실제 연결됐거나 SIM 모드면 주행 대상"""
+    return state[key]["connected"] or state["sim_mode"]
+
+def _set_phase(phase: str):
+    with _state_lock:
+        state["phase"] = phase
+    log_event(f"📍 시스템 상태 → {phase.upper()}")
+
+def raise_exception(eid: str, detail: str = ""):
+    """예외 E1–E5 표시 — EXCEPTION_SHOW_SEC 동안 발생 상태 후 처리됨으로 바뀜"""
+    with _state_lock:
+        state["exceptions"][eid] = "triggered"
+    log_event(f"⚠ {eid} {EXCEPTIONS[eid]}" + (f" ({detail})" if detail else ""))
+
+    def _resolve():
+        time.sleep(EXCEPTION_SHOW_SEC)
+        with _state_lock:
+            if state["exceptions"].get(eid) == "triggered":
+                state["exceptions"][eid] = "resolved"
+    threading.Thread(target=_resolve, daemon=True).start()
+
+def trigger_signal(source: str = "unknown", disaster: str = None):
+    """재난 신호 수신 → 2F(R1·R2) 유도 → 계단 인수인계 → 1F(R3) 유도"""
+    global _triggered, _trigger_ts, _run_gen
     with _trigger_lock:
         if _triggered:
             log_event(f"⚠ 중복 신호 무시 ({source})")
             return
         _triggered = True
+        _run_gen += 1
+        gen = _run_gen
 
+    disaster = disaster or "fire"
+    _trigger_ts = time.time()
     with _state_lock:
         state["floor2"]["signal"] = True
         state["trigger_count"] += 1
+        state["disaster"] = disaster
+        state["latency"]  = None
+        state["exceptions"] = {}
+        for k in ("floor2", "floor1", "rear"):
+            state[k]["done"] = False
+        mode = TARGET_MODES[state["target"]]
 
-    log_event(f"🚨 신호 수신 [{source}] → 1F Sphero 대피 경로 시작")
+    d = DISASTERS[disaster]
+    log_event(f"🚨 {d['icon']} {d['label']} 신호 수신 [{source}] — {d['src']}")
+    log_event(f"  안내 대상: {mode['icon']} {mode['label']} · {mode['mps']} m/s · "
+              f"LED {mode['led']} · 음성 {mode['voice']}")
+    _set_phase("armed")
 
     # 2F LED: 빨강 (위험 알림) → 2F 경로 실행 → 완료 후 1F 자동 출발
     _set_led(_bolt_2f, 255, 0, 0)
     _set_led(_bolt_r2, 255, 0, 0)
-    t = threading.Thread(target=_run_2f_then_1f, daemon=True)
+    t = threading.Thread(target=_run_2f_then_1f, args=(gen,), daemon=True)
     t.start()
 
     # cooldown 후 신호 리셋
-    threading.Thread(target=_reset_signal_after, args=(SIGNAL_COOLDOWN,), daemon=True).start()
+    threading.Thread(target=_reset_signal_after, args=(SIGNAL_COOLDOWN, gen), daemon=True).start()
 
-def _reset_signal_after(seconds: float):
+def _reset_signal_after(seconds: float, gen: int):
     global _triggered
     time.sleep(seconds)
+    if gen != _run_gen:
+        return
     with _state_lock:
         state["floor2"]["signal"] = False
     with _trigger_lock:
@@ -166,44 +238,87 @@ def _r2_path(path):
     first_speed, first_heading = path[0][0], path[0][1]
     return [(first_speed, first_heading, R2_GAP_SEC, "^")] + list(path)
 
-def _run_2f_then_1f():
+def _run_2f_then_1f(gen):
     """2F 경로(R1 선두 + R2 후방 추종) 완료 → 1F 자동 출발 (연결된 쪽만 실행)"""
-    r1_on = state["floor2"]["connected"]
-    r2_on = state["rear"]["connected"]
+    def live():
+        return gen == _run_gen
+
+    if state["disaster"] == "quake":
+        log_event("  진동 중 — 음성 안내만, 진동 종료 대기")
+        while live() and time.time() - max(_last_shake_ts, _trigger_ts) < QUAKE_SETTLE_SEC:
+            time.sleep(0.1)
+        if not live():
+            return
+        log_event(f"  진동 종료 {QUAKE_SETTLE_SEC:.0f}초 경과 → 유도 시작")
+
+    r1_on = _active("floor2")
+    r2_on = _active("rear")
+    if not r1_on and r2_on:
+        raise_exception("E5", "R1 미연결 → R2가 R1 경로를 대신 선도")
+    if not _active("floor1"):
+        raise_exception("E5", "R3 미연결 → 1층 인수인계 불가")
+    _set_phase("guiding")
     if r2_on:
         threading.Thread(
             target=_run_path,
             args=(_bolt_r2, _r2_path(EVAC_PATH_2F), "rear", "R2"),
-            kwargs={"move_color": (255, 180, 0), "done_color": (255, 0, 0)},
+            kwargs={"move_color": (255, 180, 0), "done_color": (255, 0, 0), "gen": gen},
             daemon=True,
         ).start()
     if r1_on or r2_on:
         if not r1_on:
             log_event("ℹ️  R1 미연결 — R2만 R1 경로를 따라 주행")
-        _run_path(_bolt_2f, EVAC_PATH_2F, "floor2", "2F",
-                  move_color=(255, 80, 0), done_color=(255, 0, 0))
-        log_event("🏁 2F 핸드오프 완료 → 1F Sphero 출발")
+        if not _run_path(_bolt_2f, EVAC_PATH_2F, "floor2", "2F",
+                         move_color=(255, 80, 0), done_color=(255, 0, 0), gen=gen):
+            return
+        log_event("🏁 2F 계단 앞 도달 → 중계기가 R3에 출발 명령")
     else:
         log_event("ℹ️  2F 미연결 — 1F 직접 출발")
-    if state["floor1"]["connected"]:
-        _run_path(_bolt_1f, EVAC_PATH_1F, "floor1", "1F",
-                  move_color=(0, 100, 255), done_color=(0, 255, 0))
+    if not live():
+        return
+    _set_phase("handoff")
+    if _active("floor1"):
+        if not _run_path(_bolt_1f, EVAC_PATH_1F, "floor1", "1F",
+                         move_color=(0, 100, 255), done_color=(0, 255, 0), gen=gen):
+            return
+        log_event("🚪 R3 비상구 도달")
+    _set_phase("complete")
 
-def _run_path(bolt, path, state_key, label, move_color, done_color):
-    """범용 경로 실행 — 2F/1F 공통"""
+def _run_path(bolt, path, state_key, label, move_color, done_color, gen=None):
+    """범용 경로 실행 — 2F/1F 공통. 상황 해제(세대 변경) 시 멈추고 False 반환"""
+    def cancelled():
+        return gen is not None and gen != _run_gen
+
+    def abort():
+        if bolt is not None:
+            try:
+                bolt.drive_control.roll_stop(0)
+            except Exception:
+                pass
+        with _state_lock:
+            state[state_key]["moving"] = False
+            state[state_key]["step"]   = 0
+        log_event(f"⏹ {label} 주행 중단 (상황 해제)")
+        return False
+
     with _state_lock:
         state[state_key]["moving"] = True
+        state[state_key]["done"]   = False
         state[state_key]["step"]   = 0
 
     _set_led(bolt, *move_color)
+    factor = TARGET_MODES[state["target"]]["mps"]
 
     for i, (speed, heading, duration, char) in enumerate(path):
+        if cancelled():
+            return abort()
         with _state_lock:
             state[state_key]["step"] = i + 1
 
         _set_matrix(bolt, *move_color, char)
 
         if duration > 0:
+            speed, duration = int(speed * factor), round(duration / factor, 2)
             log_event(f"  → {label} step {i+1}/{len(path)}: "
                       f"속도={speed}  방향={heading}°  {duration}s  [{char}]")
             if bolt is not None:
@@ -211,7 +326,15 @@ def _run_path(bolt, path, state_key, label, move_color, done_color):
                     bolt.drive_control.roll_start(heading, speed)
                 except Exception as e:
                     log_event(f"  [이동 오류] {e}")
-            time.sleep(duration)
+                    raise_exception("E4", f"{label} 명령 실패 — 남은 경로 계속 진행")
+            if i == 0 and state_key in ("floor2", "rear") and state["latency"] is None:
+                lat = round(time.time() - _trigger_ts, 2)
+                with _state_lock:
+                    state["latency"] = lat
+                log_event(f"⏱ 트리거→선두 출발 {lat:.1f}s (목표 ≤ 2.0s)")
+            end = time.time() + duration
+            while time.time() < end and not cancelled():
+                time.sleep(0.05)
         else:
             log_event(f"  → {label} 정지 (핸드오프 포인트)  [{char}]")
             if bolt is not None:
@@ -220,15 +343,19 @@ def _run_path(bolt, path, state_key, label, move_color, done_color):
                 except Exception:
                     pass
 
+    if cancelled():
+        return abort()
     _set_led(bolt, *done_color)
     floor_num = "1" if state_key == "floor1" else "2"
     threading.Thread(target=_scroll_connected, args=(bolt, floor_num, *done_color), daemon=True).start()
 
     with _state_lock:
         state[state_key]["moving"] = False
+        state[state_key]["done"]   = True
         state[state_key]["step"]   = 0
 
     log_event(f"✅ {label} 경로 완료")
+    return True
 
 # ── 2F 가속도 센서 콜백 ────────────────────────────────────────────────────────
 def _on_2f_sensor(data: dict):
@@ -245,7 +372,9 @@ def _on_2f_sensor(data: dict):
 
         magnitude = (ax**2 + ay**2 + az**2) ** 0.5
         if magnitude > SHAKE_THRESHOLD:
-            trigger_signal(f"2F-shake({magnitude:.1f}G)")
+            global _last_shake_ts
+            _last_shake_ts = time.time()
+            trigger_signal(f"2F-shake({magnitude:.1f}G)", "quake")
     except Exception:
         pass
 
@@ -423,6 +552,25 @@ sock = Sock(app)
 def dashboard():
     return render_template_string(_DASHBOARD_HTML)
 
+@app.route("/floorplan")
+def floorplan():
+    from flask import send_file, Response
+    try:
+        return send_file(FLOORPLAN_PDF, mimetype="application/pdf")
+    except FileNotFoundError:
+        return Response("팔달관_도면.pdf 파일을 찾을 수 없습니다.", status=404)
+
+@app.route("/floorplan-img/<floor>")
+def floorplan_img(floor):
+    from flask import send_file, Response
+    if floor not in ("1f", "2f"):
+        return Response("not found", status=404)
+    try:
+        return send_file(os.path.join(os.path.dirname(__file__), f"floorplan_{floor}.png"),
+                         mimetype="image/png")
+    except FileNotFoundError:
+        return Response(f"floorplan_{floor}.png 파일을 찾을 수 없습니다.", status=404)
+
 @app.route("/api/status")
 def api_status():
     with _state_lock:
@@ -431,6 +579,11 @@ def api_status():
             "floor1":        state["floor1"],
             "rear":          state["rear"],
             "trigger_count": state["trigger_count"],
+            "phase":         state["phase"],
+            "disaster":      state["disaster"],
+            "target":        state["target"],
+            "exceptions":    state["exceptions"],
+            "latency":       state["latency"],
             "log":           state["log"][:30],
             "sim_mode":      state["sim_mode"],
             "names":         state["names"],
@@ -473,15 +626,54 @@ def api_trigger():
     trigger_signal("대시보드-수동")
     return jsonify({"ok": True})
 
+@app.route("/api/disaster", methods=["POST"])
+def api_disaster():
+    kind = (flask_request.get_json(silent=True) or {}).get("type")
+    if kind == "clear":
+        api_reset()
+        log_event("🟢 상황 해제 — 전 로봇 평시 복귀")
+        return jsonify({"ok": True})
+    if kind not in DISASTERS:
+        return jsonify({"ok": False, "error": "unknown type"}), 400
+    trigger_signal("대시보드", kind)
+    return jsonify({"ok": True})
+
+@app.route("/api/target", methods=["POST"])
+def api_target():
+    mode = (flask_request.get_json(silent=True) or {}).get("mode")
+    if mode not in TARGET_MODES:
+        return jsonify({"ok": False, "error": "unknown mode"}), 400
+    with _state_lock:
+        state["target"] = mode
+    m = TARGET_MODES[mode]
+    log_event(f"🎯 안내 대상 → {m['icon']} {m['label']} ({m['mps']} m/s · {m['led']}) — 다음 주행부터 적용")
+    return jsonify({"ok": True})
+
+@app.route("/api/exception", methods=["POST"])
+def api_exception():
+    eid = (flask_request.get_json(silent=True) or {}).get("id")
+    if eid not in EXCEPTIONS:
+        return jsonify({"ok": False, "error": "unknown id"}), 400
+    raise_exception(eid, "대시보드 수동 발생")
+    return jsonify({"ok": True})
+
 @app.route("/api/reset", methods=["POST"])
 def api_reset():
-    global _triggered
+    global _triggered, _run_gen
+    with _trigger_lock:
+        _run_gen += 1
     with _state_lock:
         state["floor2"]["signal"] = False
         state["floor1"]["moving"] = False
         state["floor1"]["step"]   = 0
         state["rear"]["moving"]   = False
         state["rear"]["step"]     = 0
+        for k in ("floor2", "floor1", "rear"):
+            state[k]["done"] = False
+        state["phase"]      = "idle"
+        state["disaster"]   = None
+        state["exceptions"] = {}
+        state["latency"]    = None
     with _trigger_lock:
         _triggered = False
     _set_led(_bolt_2f, 0, 255, 0)
@@ -828,15 +1020,15 @@ _DASHBOARD_HTML = r"""<!doctype html>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { background: var(--bg); color: var(--txt); font: 14px/1.6 'Pretendard', 'Noto Sans KR', system-ui, sans-serif; min-height: 100vh; }
 
-header { padding: 20px 24px 12px; border-bottom: 1px solid var(--bdr); display: flex; align-items: center; gap: 12px; }
+header { padding: 14px 24px; border-bottom: 1px solid var(--bdr); display: flex; align-items: center; gap: 12px; }
 header h1 { font-size: 18px; font-weight: 700; }
 .sim-badge { background: #78350f; color: #fde68a; font-size: 11px; padding: 2px 8px; border-radius: 4px; display: none; }
 
-.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 20px 24px; }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; padding: 2px 20px 24px; }
 @media (max-width: 700px) { .grid { grid-template-columns: 1fr; } }
 
-.card { background: var(--card); border: 1px solid var(--bdr); border-radius: 12px; padding: 20px; }
-.card h2 { font-size: 13px; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 14px; }
+.card { background: var(--card); border: 1px solid var(--bdr); border-radius: 12px; padding: 13px 15px; }
+.card h2 { font-size: 11px; font-weight: 600; color: var(--ink3); text-transform: uppercase; letter-spacing: .09em; margin-bottom: 10px; }
 
 .status-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
 .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--red); flex-shrink: 0; }
@@ -870,9 +1062,9 @@ header h1 { font-size: 18px; font-weight: 700; }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .5; } }
 
 /* Buttons */
-.btn-row { display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
-.btn { padding: 10px 20px; border-radius: 8px; border: none; cursor: pointer;
-  font-size: 14px; font-weight: 600; transition: opacity .15s; }
+.btn-row { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+.btn { padding: 6px 14px; border-radius: 7px; border: none; cursor: pointer;
+  font-size: 13px; font-weight: 600; transition: opacity .15s; }
 .btn:hover { opacity: .85; }
 .btn-trigger { background: var(--red);   color: #fff; }
 .btn-reset   { background: var(--bdr);   color: var(--txt); }
@@ -924,6 +1116,129 @@ header h1 { font-size: 18px; font-weight: 700; }
 .btn-follow-off { background: #7f1d1d; color: #fca5a5; border: 1px solid #ef4444; }
 .preview-age { position: absolute; bottom: 4px; right: 6px; font-size: 10px;
   color: rgba(255,255,255,.6); background: rgba(0,0,0,.5); padding: 1px 5px; border-radius: 3px; }
+#floorplanWrap { background: #fff; }
+.fp-stage { position: relative; background: #fff; }
+.fp-stage img { width: 100%; display: block; }
+.robot { position: absolute; transform: translate(-50%, -50%); z-index: 5; pointer-events: none;
+  transition: left 1.4s linear, top 1.4s linear; }
+.robot .rb-dot { width: 22px; height: 22px; border-radius: 50%; border: 3px solid #fff;
+  background: #9ca3af; box-shadow: 0 1px 4px rgba(0,0,0,.45); display: flex; align-items: center;
+  justify-content: center; font-size: 9px; font-weight: 800; color: #fff; }
+.robot .rb-tag { position: absolute; left: 50%; bottom: 28px; transform: translateX(-50%);
+  white-space: nowrap; font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 10px;
+  background: rgba(17,24,39,.85); color: #fff; }
+.robot.rb-rear .rb-tag { bottom: auto; top: 28px; }
+.robot.idle   .rb-dot { background: #22c55e; }
+.robot.moving .rb-dot { background: #f97316; animation: rbPulse 1s infinite; }
+.robot.done   .rb-dot { background: #2563eb; }
+@keyframes rbPulse { 0% { box-shadow: 0 0 0 0 rgba(249,115,22,.7); }
+  100% { box-shadow: 0 0 0 14px rgba(249,115,22,0); } }
+.fp-legend { display: flex; gap: 14px; flex-wrap: wrap; padding: 8px 20px; font-size: 12px;
+  color: var(--dim); border-top: 1px solid var(--bdr); }
+.fp-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+  margin-right: 5px; vertical-align: -1px; }
+
+/* ── 재난 대응 (시연 페이지 UI 기준) ── */
+:root { --panel2: #1c232c; --wire: #3b4654; --ink2: #9aa7b4; --ink3: #6b7785;
+  --ok: #34d399; --bad: #f87171; --fire: #ff6b35; --quake: #a78bfa; --black: #fbbf24; --blue2: #5b9bd5; }
+.ops { display: grid; grid-template-columns: 270px minmax(400px, 1fr) 300px; gap: 14px;
+  padding: 14px 20px 0; align-items: start; }
+@media (max-width: 1100px) { .ops { grid-template-columns: 1fr; } }
+.ops .card { margin-bottom: 12px; }
+.state-pill { margin-left: auto; font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 20px;
+  background: var(--panel2); border: 1px solid var(--bdr); color: var(--ink2); letter-spacing: .06em; transition: .3s; }
+.state-pill.armed    { border-color: var(--black); color: var(--black); background: rgba(251,191,36,.12); }
+.state-pill.guiding  { border-color: var(--ok);    color: var(--ok);    background: rgba(52,211,153,.12); }
+.state-pill.handoff  { border-color: var(--blue2); color: var(--blue2); background: rgba(91,155,213,.12); }
+.state-pill.complete { border-color: var(--ok);    color: var(--ok);    background: rgba(52,211,153,.18); }
+.hdr-btn { appearance: none; border: 1px solid var(--bdr); background: var(--panel2); color: var(--ink2);
+  border-radius: 7px; padding: 3px 10px; font: inherit; font-size: 11px; font-weight: 600; cursor: pointer; transition: .15s; }
+.hdr-btn:hover { border-color: var(--bad); color: var(--bad); }
+
+.timeline { display: flex; align-items: center; margin: 4px 0 8px; }
+.tnode { display: flex; flex-direction: column; align-items: center; gap: 3px; flex: 1; }
+.tnode .tc { width: 36px; height: 36px; border-radius: 50%; background: var(--panel2); border: 2px solid var(--wire);
+  display: grid; place-items: center; font-size: 7.5px; font-weight: 700; color: var(--ink3); letter-spacing: .02em; transition: .3s; }
+.tnode .tl { font-size: 9.5px; color: var(--ink3); font-weight: 600; text-align: center; line-height: 1.2; }
+.tnode.active .tc { border-color: var(--ok); background: rgba(52,211,153,.15); color: var(--ok); }
+.tnode.done .tc   { border-color: var(--blue2); background: rgba(91,155,213,.12); color: var(--blue2); }
+.tarrow { color: var(--wire); font-size: 11px; margin: 0 1px; padding-bottom: 16px; transition: .3s; flex: none; }
+.tarrow.on { color: var(--ok); }
+.meta-row { display: flex; gap: 14px; flex-wrap: wrap; font-size: 11px; color: var(--ink3); }
+.meta-row b { color: var(--txt); font-weight: 600; }
+.note { margin-top: 8px; padding: 8px 10px; border-radius: 7px; background: var(--panel2);
+  border-left: 2px solid var(--bdr); font-size: 11.5px; color: var(--ink2); line-height: 1.5; }
+.note b { color: var(--txt); }
+
+.dz-btns { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+.dz { appearance: none; border: 1px solid var(--bdr); background: var(--panel2); color: var(--txt);
+  border-radius: 9px; padding: 10px 7px; font: inherit; font-weight: 600; cursor: pointer; text-align: center;
+  transition: .15s; display: flex; flex-direction: column; align-items: center; gap: 3px; }
+.dz .ico { font-size: 18px; line-height: 1; }
+.dz small { font-weight: 400; color: var(--ink3); font-size: 10.5px; }
+.dz:hover { border-color: var(--ink3); transform: translateY(-1px); }
+.dz.fire.on  { border-color: var(--fire);  background: rgba(255,107,53,.14);  color: var(--fire); }
+.dz.quake.on { border-color: var(--quake); background: rgba(167,139,250,.14); color: var(--quake); }
+.dz.black.on { border-color: var(--black); background: rgba(251,191,36,.14);  color: var(--black); }
+.dz-clear { grid-column: 1/-1; background: transparent; font-size: 12.5px; }
+.dz-clear:hover { border-color: var(--ok); color: var(--ok); }
+
+.seg { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
+.seg button { appearance: none; border: 1px solid var(--bdr); background: var(--panel2); color: var(--ink2);
+  border-radius: 7px; padding: 7px 4px; font: inherit; font-size: 11.5px; cursor: pointer; transition: .15s;
+  display: flex; flex-direction: column; align-items: center; gap: 1px; }
+.seg button .ico { font-size: 15px; }
+.seg button .spd { font-size: 9.5px; color: var(--ink3); }
+.seg button.on { border-color: var(--ok); color: var(--txt); background: rgba(52,211,153,.12); }
+
+.bots { display: grid; gap: 6px; }
+.bot { display: flex; align-items: center; gap: 9px; padding: 8px 10px; background: var(--panel2);
+  border: 1px solid var(--bdr); border-radius: 8px; transition: .2s; }
+.rball { width: 32px; height: 32px; border-radius: 7px; background: #111; flex: none; display: grid;
+  place-items: center; font-size: 12px; font-weight: 800; color: #333; transition: .3s; }
+.bot .n { font-weight: 600; font-size: 12px; }
+.bot .n span { font-weight: 400; color: var(--ink3); font-size: 10.5px; }
+.bot .s { font-size: 10.5px; color: var(--ink3); }
+.bot .st { margin-left: auto; font-size: 10px; padding: 2px 7px; border-radius: 4px; background: #1a2030;
+  color: var(--ink3); font-weight: 700; letter-spacing: .04em; min-width: 60px; text-align: center; flex: none; }
+.bot.armed .st    { background: rgba(251,191,36,.14); color: var(--black); }
+.bot.guiding .st  { background: rgba(52,211,153,.15); color: var(--ok); }
+.bot.handoff .st  { background: rgba(91,155,213,.14); color: var(--blue2); }
+.bot.complete .st { background: rgba(52,211,153,.2);  color: var(--ok); }
+
+.cnode { display: flex; gap: 10px; align-items: flex-start; padding: 8px 9px; border-radius: 8px;
+  border: 1px solid transparent; transition: .2s; }
+.cnode.active { background: var(--panel2); border-color: var(--bdr); }
+.cnode .cdot { width: 9px; height: 9px; border-radius: 50%; background: var(--wire); margin-top: 5px; flex: none; transition: .2s; }
+.cnode.active .cdot { background: var(--ok); box-shadow: 0 0 0 4px rgba(52,211,153,.16); }
+.cnode.cut .cdot { background: var(--bad); }
+.cnode .t { font-weight: 600; font-size: 12.5px; }
+.cnode .d { font-size: 11px; color: var(--ink3); margin-top: 1px; }
+.cnode.cut .t { color: var(--bad); text-decoration: line-through; text-decoration-thickness: 1px; }
+.clink { width: 1px; height: 10px; background: var(--wire); margin-left: 13px; }
+.clink.on  { background: var(--ok); }
+.clink.cut { background: repeating-linear-gradient(180deg, var(--bad) 0 3px, transparent 3px 6px); }
+
+.excepts { display: grid; gap: 4px; }
+.ex { appearance: none; width: 100%; display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 6px;
+  background: var(--panel2); border: 1px solid var(--bdr); font: inherit; font-size: 11px; color: var(--txt);
+  text-align: left; cursor: pointer; transition: .3s; }
+.ex:hover { border-color: var(--ink3); }
+.ex .eid { width: 22px; height: 22px; border-radius: 50%; background: #1a2030; border: 1px solid var(--wire);
+  display: grid; place-items: center; font-size: 9px; font-weight: 700; color: var(--ink3); flex: none; }
+.ex .etxt { color: var(--ink3); flex: 1; }
+.ex .est { font-size: 10px; font-weight: 700; flex: none; }
+.ex.triggered { border-color: var(--bad); background: rgba(248,113,113,.1); }
+.ex.triggered .eid { border-color: var(--bad); color: var(--bad); background: rgba(248,113,113,.15); }
+.ex.triggered .etxt { color: var(--txt); }
+.ex.triggered .est { color: var(--bad); }
+.ex.resolved { border-color: var(--ok); background: rgba(52,211,153,.08); }
+.ex.resolved .eid { border-color: var(--ok); color: var(--ok); }
+.ex.resolved .est { color: var(--ok); }
+
+footer { padding: 0 20px 24px; color: var(--ink3); font-size: 11px; line-height: 1.75; }
+footer b { color: var(--ink2); }
+kbd { background: var(--panel2); border: 1px solid var(--bdr); border-radius: 4px; padding: 1px 5px; font-size: 10.5px; }
 </style>
 </head>
 <body>
@@ -932,7 +1247,112 @@ header h1 { font-size: 18px; font-weight: 700; }
   <span style="font-size:22px;">🤖</span>
   <h1>Sphero PoC 브로커 &nbsp;—&nbsp; 재난 대피 안내 로봇</h1>
   <span class="sim-badge" id="simBadge">SIM</span>
+  <span class="state-pill" id="statePill" title="시스템 상태">IDLE</span>
+  <button class="hdr-btn" onclick="restartBroker()">↺ 브로커 재시작</button>
 </header>
+
+<div class="ops">
+  <div>
+    <!-- 재난 트리거 -->
+    <div class="card">
+      <h2>재난 트리거</h2>
+      <div class="dz-btns">
+        <button class="dz fire"  id="dzfire"  onclick="sendDisaster('fire')"><span class="ico">🔥</span>화재<small>서버 신호</small></button>
+        <button class="dz quake" id="dzquake" onclick="sendDisaster('quake')"><span class="ico">🌍</span>지진<small>가속도계 감지</small></button>
+        <button class="dz black" id="dzblack" onclick="sendDisaster('black')"><span class="ico">💡</span>정전<small>조도 센서 감지</small></button>
+        <button class="dz dz-clear" onclick="sendDisaster('clear')">상황 해제 · 평시 복귀</button>
+      </div>
+      <div class="note" id="triggerNote"></div>
+    </div>
+    <!-- 안내 대상 모드 -->
+    <div class="card">
+      <h2>안내 대상 모드</h2>
+      <div class="seg" id="seg"></div>
+      <div class="note" id="targetNote"></div>
+    </div>
+    <!-- 로봇 상태 -->
+    <div class="card">
+      <h2>로봇 상태 R1–R4</h2>
+      <div class="bots" id="bots"></div>
+    </div>
+  </div>
+  <div>
+    <!-- 대피 흐름 타임라인 -->
+    <div class="card">
+      <h2>팔달관 대피 흐름 — 2층 복도 → 계단 → 1층 로비 → 비상구</h2>
+      <div class="timeline">
+        <div class="tnode" id="tn0"><div class="tc">IDLE</div><div class="tl">대기</div></div>
+        <div class="tarrow" id="ta0">›</div>
+        <div class="tnode" id="tn1"><div class="tc">ARMED</div><div class="tl">감지</div></div>
+        <div class="tarrow" id="ta1">›</div>
+        <div class="tnode" id="tn2"><div class="tc">GUIDING</div><div class="tl">유도</div></div>
+        <div class="tarrow" id="ta2">›</div>
+        <div class="tnode" id="tn3"><div class="tc">HANDOFF</div><div class="tl">인수인계</div></div>
+        <div class="tarrow" id="ta3">›</div>
+        <div class="tnode" id="tn4"><div class="tc">COMPLETE</div><div class="tl">완료</div></div>
+      </div>
+      <div class="meta-row">
+        <span>재난 <b id="metaDisaster">없음</b></span>
+        <span>안내 대상 <b id="metaTarget">—</b></span>
+        <span>트리거→선두 출발 <b id="metaLatency">—</b> (목표 ≤ 2.0s)</span>
+      </div>
+    </div>
+    <!-- 팔달관 평면도 -->
+    <div class="card" style="padding:0; overflow:hidden;">
+      <div style="display:flex; align-items:center; justify-content:space-between; padding:12px 20px; border-bottom:1px solid var(--bdr); flex-wrap:wrap; gap:8px;">
+        <h2 style="margin:0;">🗺 팔달관 대피 경로 도면</h2>
+        <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+          <button class="btn" id="fpTab2f" style="padding:4px 10px; font-size:11px; background:var(--blu); color:#fff;"
+            onclick="floorplanTab('2f', true)">2층 · R1 R2</button>
+          <button class="btn" id="fpTab1f" style="padding:4px 10px; font-size:11px; background:var(--bdr); color:var(--txt);"
+            onclick="floorplanTab('1f', true)">1층 · R3</button>
+          <button class="btn" style="padding:4px 10px; font-size:11px; background:var(--bdr); color:var(--txt);"
+            onclick="window.open('/floorplan','_blank')">↗ PDF</button>
+          <button class="btn" style="padding:4px 10px; font-size:11px; background:var(--bdr); color:var(--txt);"
+            id="btnFloorplanToggle" onclick="toggleFloorplan()">▲ 접기</button>
+        </div>
+      </div>
+      <div id="floorplanWrap">
+        <div class="fp-stage" id="fpStage2f">
+          <img src="/floorplan-img/2f" alt="팔달관 2층 도면">
+          <div class="robot" id="robotR1"><div class="rb-dot">R1</div><div class="rb-tag">R1 선두</div></div>
+          <div class="robot rb-rear" id="robotR2"><div class="rb-dot">R2</div><div class="rb-tag">R2 후방</div></div>
+        </div>
+        <div class="fp-stage" id="fpStage1f" style="display:none;">
+          <img src="/floorplan-img/1f" alt="팔달관 1층 도면">
+          <div class="robot" id="robotR3"><div class="rb-dot">R3</div><div class="rb-tag">R3 1층</div></div>
+        </div>
+        <div class="fp-legend">
+          <span><i style="background:#9ca3af"></i>미연결</span>
+          <span><i style="background:#22c55e"></i>출발점 대기</span>
+          <span><i style="background:#f97316"></i>경로 주행 중</span>
+          <span><i style="background:#2563eb"></i>도착 (핸드오프·비상구)</span>
+          <span>위치는 경로 단계 기준 추정값</span>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div>
+    <!-- 신호 전달 경로 -->
+    <div class="card">
+      <h2>신호 전달 경로</h2>
+      <div class="cnode" id="cn0"><span class="cdot"></span><div><div class="t">재난 트리거</div><div class="d">화재: 서버 신호 / 지진·정전: 로봇 센서</div></div></div>
+      <div class="clink" id="cl0"></div>
+      <div class="cnode" id="cn1"><span class="cdot"></span><div><div class="t">중계기 (이 브로커)</div><div class="d">상태 수집 · 판단 · 명령 · 대시보드</div></div></div>
+      <div class="clink" id="cl1"></div>
+      <div class="cnode" id="cn2"><span class="cdot"></span><div><div class="t">BLE 게이트웨이</div><div class="d">랩탑 → Sphero BOLT</div></div></div>
+      <div class="clink" id="cl2"></div>
+      <div class="cnode" id="cn3"><span class="cdot"></span><div><div class="t">R1 · R2 · R3</div><div class="d">LED 화살표 · 대피 유도</div></div></div>
+      <div class="note" id="pathNote"></div>
+    </div>
+    <!-- 예외 처리 -->
+    <div class="card">
+      <h2>예외 처리 E1–E5</h2>
+      <div class="excepts" id="excepts"></div>
+      <div class="note">E4·E5는 주행 중 자동 표시. 항목을 누르면 시연용으로 수동 발생 (표시·로그만, 로봇 동작은 바뀌지 않음).</div>
+    </div>
+  </div>
+</div>
 
 <div class="grid">
 
@@ -1002,7 +1422,6 @@ header h1 { font-size: 18px; font-weight: 700; }
     <div class="btn-row">
       <button class="btn btn-connect" id="btnConnect" onclick="connectSphero()">🔌 연결 시작</button>
       <button class="btn btn-disconnect" id="btnDisconnect" onclick="disconnectSphero()">⏏ 연결 해제</button>
-      <button class="btn btn-restart" onclick="restartBroker()">↺ 브로커 재시작</button>
     </div>
     <p class="connect-hint" id="connectHint">Sphero Edu 앱에서 각 볼트의 이름을 확인 후 입력하세요.</p>
   </div>
@@ -1047,7 +1466,15 @@ header h1 { font-size: 18px; font-weight: 700; }
   </div>
   </div><!-- /follow-log-row -->
 
+
 </div>
+
+<footer>
+  <b>동작 흐름</b> — 트리거 발생 → 대피 유도 → 층간 인수인계 → 비상구 도달.
+  &nbsp;· <b>목표</b>: 트리거→선두 출발 ≤ 2.0초 · 비상구 유도 완료율 ≥ 80% · 모든 대피자 안내 ≥ 80%.
+  &nbsp;· 모든 모드는 1.0 m/s 이하 (보행 속도 1.2–1.4 m/s보다 느려야 로봇이 앞서지 않음).
+  &nbsp;· 키보드: <kbd>1</kbd> 화재 <kbd>2</kbd> 지진 <kbd>3</kbd> 정전 <kbd>0</kbd> 해제
+</footer>
 
 <script>
 const PATH_2F = """ + json.dumps([
@@ -1062,6 +1489,194 @@ const PATH_R2 = """ + json.dumps([
     {"step": i+1, "char": char, "speed": spd, "heading": hdg, "duration": dur}
     for i, (spd, hdg, dur, char) in enumerate(_r2_path(EVAC_PATH_2F))
 ]) + r""";
+const TARGET_MODES = """ + json.dumps(TARGET_MODES, ensure_ascii=False, indent=1) + r""";
+const DISASTERS    = """ + json.dumps(DISASTERS, ensure_ascii=False, indent=1) + r""";
+const EXCEPTIONS   = """ + json.dumps(EXCEPTIONS, ensure_ascii=False, indent=1) + r""";
+const PHASES = ['idle', 'armed', 'guiding', 'handoff', 'complete'];
+const PATH_NOTES = {
+  fire:  '<b>네트워크 경유</b> — 화재는 로봇이 직접 감지할 수 없음. 외부 신호(수신반 대역)를 중계기가 받아 전달.',
+  quake: '<b>다중 교차검증</b> — 1대만 흔들리면 외부 접촉, 여러 대가 동시에 흔들리면 지진 확정. (PoC: R1 가속도 ' + """ + str(SHAKE_THRESHOLD) + r""" + 'G↑)',
+  black: '<b>자립 감지</b> — 정전 시 공유기도 꺼짐. 로봇이 광센서로 스스로 판정하고 저장 경로로 유도. (PoC: 브로커가 저장 경로를 그대로 실행)'
+};
+const ROBOTS = [
+  { id: 'R1', key: 'floor2', name: 'R1 선두',    role: 'LED 화살표 방향 표시',      color: '#ff6b35' },
+  { id: 'R2', key: 'rear',   name: 'R2 후방',    role: '이탈 감지 · 스마트폰 탑재', color: '#fbbf24' },
+  { id: 'R3', key: 'floor1', name: 'R3 1층 대기', role: '서버 신호로 층간 인수인계', color: '#34d399' },
+  { id: 'R4', key: null,     name: 'R4 예비',    role: '고장 시 R1·R2 역할 대체',   color: '#9aa7b4' }
+];
+
+function postJSON(url, body) {
+  return fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    .then(() => update()).catch(console.error);
+}
+function sendDisaster(type) { postJSON('/api/disaster', { type }); }
+function setTarget(mode)    { postJSON('/api/target', { mode }); }
+function fireException(id)  { postJSON('/api/exception', { id }); }
+
+document.getElementById('seg').innerHTML = Object.entries(TARGET_MODES).map(([k, m]) =>
+  `<button id="seg_${k}" onclick="setTarget('${k}')"><span class="ico">${m.icon}</span>${m.label}` +
+  `<span class="spd">${m.mps} m/s · ${m.led}</span></button>`).join('');
+document.getElementById('excepts').innerHTML = Object.entries(EXCEPTIONS).map(([k, t]) =>
+  `<button class="ex" id="ex_${k}" onclick="fireException('${k}')"><span class="eid">${k}</span>` +
+  `<span class="etxt">${t}</span><span class="est"></span></button>`).join('');
+
+document.addEventListener('keydown', e => {
+  if (['INPUT', 'TEXTAREA'].includes(e.target.tagName) || e.metaKey || e.ctrlKey || e.altKey) return;
+  const m = { '1': 'fire', '2': 'quake', '3': 'black', '0': 'clear' }[e.key];
+  if (m) sendDisaster(m);
+});
+
+function robotPhase(r, d) {
+  const ph = d.phase;
+  if (!r.key) return d.exceptions.E5 === 'triggered' ? '투입 요청' : '예비 대기';
+  const s = d[r.key];
+  if (r.key === 'floor1') {
+    if (ph === 'idle') return 'IDLE';
+    if (ph === 'armed' || ph === 'guiding') return 'ARMED';
+    if (ph === 'handoff') return s.moving ? 'GUIDING' : 'HANDOFF';
+    return 'COMPLETE';
+  }
+  if (ph === 'idle' || ph === 'armed') return ph.toUpperCase();
+  if (ph === 'guiding') return s.moving || !s.done ? 'GUIDING' : 'HANDOFF';
+  return ph === 'handoff' ? 'HANDOFF' : 'COMPLETE';
+}
+
+function renderFlow(d) {
+  const ph = d.phase || 'idle', idx = PHASES.indexOf(ph);
+  const pill = document.getElementById('statePill');
+  pill.className = 'state-pill ' + ph;
+  pill.textContent = ph.toUpperCase();
+  PHASES.forEach((_, i) => {
+    document.getElementById('tn' + i).className = 'tnode' + (i === idx ? ' active' : i < idx ? ' done' : '');
+    if (i < 4) document.getElementById('ta' + i).className = 'tarrow' + (i < idx ? ' on' : '');
+  });
+
+  const dz = d.disaster ? DISASTERS[d.disaster] : null;
+  const tm = TARGET_MODES[d.target];
+  document.getElementById('metaDisaster').textContent = dz ? `${dz.icon} ${dz.label}` : '없음';
+  document.getElementById('metaTarget').textContent   = `${tm.icon} ${tm.label} · ${tm.mps} m/s`;
+  document.getElementById('metaLatency').textContent  = d.latency == null ? '—'
+    : d.latency.toFixed(1) + 's' + (d.disaster === 'quake' ? ' (진동 종료 대기 포함)' : '');
+
+  ['fire', 'quake', 'black'].forEach(k =>
+    document.getElementById('dz' + k).classList.toggle('on', d.disaster === k));
+  document.getElementById('triggerNote').innerHTML = dz
+    ? `<b>${dz.label}</b> — ${dz.note}`
+    : '평시 — 로봇 연결 상태(하트비트) 확인 중. 버튼이나 키보드 1·2·3으로 재난 상황을 발생시키세요.';
+
+  Object.keys(TARGET_MODES).forEach(k =>
+    document.getElementById('seg_' + k).classList.toggle('on', d.target === k));
+  document.getElementById('targetNote').innerHTML =
+    `<b>${tm.label}</b> — ${tm.led}, ${tm.mps} m/s. 음성: ${tm.voice}. ` +
+    `Sphero 속도 ×${tm.mps}, 구간 시간 ÷${tm.mps}로 같은 거리 유지 (다음 주행부터 적용).`;
+
+  document.getElementById('bots').innerHTML = ROBOTS.map(r => {
+    const st = robotPhase(r, d);
+    const online = r.key && (d[r.key].connected || d.sim_mode);
+    const conn = !r.key ? '하드웨어 없음' : d[r.key].connected ? '연결됨' : d.sim_mode ? 'SIM' : '미연결';
+    const lit = online && st !== 'IDLE';
+    const ballStyle = lit ? `color:${r.color};box-shadow:inset 0 0 0 1px ${r.color}` : online ? 'color:#6b7785' : '';
+    return `<div class="bot ${st.toLowerCase()}">
+      <div class="rball" style="${ballStyle}">${r.id}</div>
+      <div style="min-width:0"><div class="n">${r.name} <span>· ${conn}</span></div><div class="s">${r.role}</div></div>
+      <div class="st">${st}</div></div>`;
+  }).join('');
+
+  const anyConn = d.sim_mode || d.floor2.connected || d.floor1.connected || d.rear.connected;
+  const running = ['guiding', 'handoff', 'complete'].includes(ph);
+  let cs = ['', '', '', ''];
+  if (d.disaster === 'black') cs = ['cut', 'cut', 'cut', running ? 'on' : ''];
+  else if (d.disaster) cs = ['on', 'on', anyConn ? 'on' : 'cut', running || d.disaster === 'quake' ? 'on' : ''];
+  cs.forEach((c, i) => {
+    document.getElementById('cn' + i).className = 'cnode' + (c === 'on' ? ' active' : c === 'cut' ? ' cut' : '');
+    if (i < 3) document.getElementById('cl' + i).className = 'clink' +
+      (cs[i] === 'cut' || cs[i + 1] === 'cut' ? ' cut' : cs[i] === 'on' && cs[i + 1] === 'on' ? ' on' : '');
+  });
+  document.getElementById('pathNote').innerHTML = d.disaster
+    ? PATH_NOTES[d.disaster] : '평시 — 신호 없음. 연결 상태로 로봇 고장 감지.';
+
+  Object.keys(EXCEPTIONS).forEach(k => {
+    const v = d.exceptions[k] || '';
+    const el = document.getElementById('ex_' + k);
+    el.className = 'ex ' + v;
+    el.querySelector('.est').textContent = v === 'triggered' ? '발생' : v === 'resolved' ? '처리됨' : '';
+  });
+}
+
+function toggleFloorplan() {
+  const wrap = document.getElementById('floorplanWrap');
+  const btn  = document.getElementById('btnFloorplanToggle');
+  const open = wrap.style.display === 'none';
+  wrap.style.display = open ? 'block' : 'none';
+  btn.textContent = open ? '▲ 접기' : '▼ 펼치기';
+}
+let fpManual = false, fpFloor = '2f';
+function floorplanTab(floor, manual) {
+  if (manual) fpManual = true;
+  fpFloor = floor;
+  ['2f','1f'].forEach(f => {
+    document.getElementById('fpStage' + f).style.display = f === floor ? 'block' : 'none';
+    const t = document.getElementById('fpTab' + f);
+    t.style.background = f === floor ? 'var(--blu)' : 'var(--bdr)';
+    t.style.color      = f === floor ? '#fff' : 'var(--txt)';
+  });
+  const wrap = document.getElementById('floorplanWrap');
+  if (wrap.style.display === 'none') toggleFloorplan();
+}
+
+// 도면 이미지 기준 % 좌표 (도면 PNG의 파란 스피로 경로 꺾임점)
+const FP_W = 1150, FP_H = 740;
+const ROUTE_2F = [[66.1,44.7],[64.1,45.3],[64.1,60.8],[54.6,60.8],[54.6,89.6]];
+const ROUTE_1F = [[67.5,45.0],[56.1,45.0],[56.1,18.5]];
+function pointOnRoute(route, t) {
+  t = Math.max(0, Math.min(1, t));
+  const seg = [];
+  let total = 0;
+  for (let i = 1; i < route.length; i++) {
+    const dx = (route[i][0] - route[i-1][0]) * FP_W, dy = (route[i][1] - route[i-1][1]) * FP_H;
+    const len = Math.hypot(dx, dy);
+    seg.push(len); total += len;
+  }
+  let d = t * total;
+  for (let i = 0; i < seg.length; i++) {
+    if (d <= seg[i] || i === seg.length - 1) {
+      const r = seg[i] ? Math.min(1, d / seg[i]) : 0;
+      return [route[i][0] + (route[i+1][0] - route[i][0]) * r,
+              route[i][1] + (route[i+1][1] - route[i][1]) * r];
+    }
+    d -= seg[i];
+  }
+}
+// leadSteps: R2처럼 R1 출발점까지 먼저 달리는 간격 구간 수
+function placeRobot(id, s, route, leadSteps) {
+  const el = document.getElementById(id);
+  let t = 0, cls = 'idle', word = '대기';
+  if (!s.connected && !simMode && !s.moving) { cls = ''; word = '미연결'; }
+  if (s.moving) {
+    const n = Math.max(1, s.total_steps - leadSteps);
+    t = Math.max(0, (s.step || 0) - leadSteps) / n;
+    cls = 'moving'; word = '주행';
+  } else if (s.done) {
+    t = 1; cls = 'done'; word = '도착';
+  }
+  const [x, y] = pointOnRoute(route, t);
+  el.style.left = x + '%';
+  el.style.top  = y + '%';
+  el.className  = 'robot ' + cls + (id === 'robotR2' ? ' rb-rear' : '');
+  el.querySelector('.rb-tag').textContent = el.querySelector('.rb-dot').textContent + ' ' + word;
+}
+let simMode = false;
+function updateFloorplan(d) {
+  simMode = !!d.sim_mode;
+  placeRobot('robotR1', d.floor2, ROUTE_2F, 0);
+  placeRobot('robotR2', d.rear,   ROUTE_2F, 1);
+  placeRobot('robotR3', d.floor1, ROUTE_1F, 0);
+  // 주행 중인 층을 자동으로 보여줌 (사용자가 탭을 누르면 자동 전환 중단)
+  if (!fpManual) {
+    if (d.floor1.moving && fpFloor !== '1f') floorplanTab('1f', false);
+    else if ((d.floor2.moving || d.rear.moving) && fpFloor !== '2f') floorplanTab('2f', false);
+  }
+}
 
 function triggerSignal() {
   fetch('/api/trigger', { method: 'POST' }).catch(console.error);
@@ -1205,6 +1820,9 @@ function update() {
       document.getElementById('pathLabelR2').textContent = r2.moving
         ? `R1 경로 추종 중: ${r2.step} / ${r2.total_steps}`
         : ((r2.step || 0) === 0 ? '대기 중' : '완료');
+
+      updateFloorplan(d);
+      renderFlow(d);
 
       // counter
       document.getElementById('triggerCount').textContent = d.trigger_count;
