@@ -1,6 +1,9 @@
-# 잇다 (ITDA) — Sphero 재난 대피 안내 로봇 브로커
+<p align="center"><img src="docs/bandi-logo.png" alt="BANDI" width="560"></p>
 
-ISE103 융합시스템창의설계 팀 프로젝트 (4조 잇다).
+# 반디 (BANDI) — Sphero 재난 대피 안내 로봇 브로커
+
+ISE103 융합시스템창의설계 팀 프로젝트 (4조 잇다 ITDA).
+**반디**는 반딧불이처럼 빛나는 공 로봇이 어둠 속에서 앞서가며 비상구로 길을 안내한다는 뜻이다.
 Sphero BOLT 로봇(R1·R2·R3)과 Android 앱을 연결하는 Flask 브로커 서버와 웹 대시보드.
 팔달관 2층 복도 → 계단 → 1층 로비 → 비상구로 대피자를 안내한다.
 
@@ -70,6 +73,7 @@ IDLE → ARMED → GUIDING → HANDOFF → COMPLETE 흐름과 예외 처리 E2�
 |------|------|
 | `sphero_broker.py` | Flask 브로커 서버 (BLE 연결, 경로 주행, 카메라 감지, 대시보드 내장) |
 | `floorplan_1f.png`, `floorplan_2f.png` | 대시보드용 팔달관 1·2층 도면 |
+| `brand/` | BANDI 로고(투명 배경) · 심볼 · 파비콘 |
 | `팔달관_도면.pdf`, `팔달관_도면.html` | 층별 도면 원본 (실측 기입용) |
 | `재난대피로봇_시연/index.html` | 단독 시연 페이지 (서버 없이 애니메이션만) |
 | `동작 알고리즘 개선안 v2.md` | 알고리즘 설계 문서 |

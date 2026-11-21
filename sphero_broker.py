@@ -20,6 +20,7 @@ import json
 import logging
 import base64
 import queue as _queue
+import socket
 from datetime import datetime
 from flask import Flask, jsonify, render_template_string, request as flask_request
 from flask_sock import Sock
@@ -124,6 +125,17 @@ _broker_stop_evt = threading.Event()
 _trigger_ts      = 0.0
 _last_shake_ts   = 0.0
 _run_gen         = 0    # 트리거·리셋마다 증가 — 이전 세대 주행 스레드는 스스로 멈춘다
+
+def _lan_ip() -> str:
+    """폰 앱이 접속할 이 맥의 사설망 IP (UDP connect는 패킷을 보내지 않음)"""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("10.255.255.255", 1))
+        return s.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        s.close()
 
 def _active(key: str) -> bool:
     """실제 연결됐거나 SIM 모드면 주행 대상"""
@@ -560,6 +572,19 @@ def floorplan():
     except FileNotFoundError:
         return Response("팔달관_도면.pdf 파일을 찾을 수 없습니다.", status=404)
 
+BRAND_FILES = {"logo": "bandi_logo.png", "symbol": "bandi_symbol.png", "favicon": "favicon.png"}
+
+@app.route("/brand/<name>")
+def brand_img(name):
+    from flask import send_file, Response
+    if name not in BRAND_FILES:
+        return Response("not found", status=404)
+    try:
+        return send_file(os.path.join(os.path.dirname(__file__), "brand", BRAND_FILES[name]),
+                         mimetype="image/png", max_age=86400)
+    except FileNotFoundError:
+        return Response(f"brand/{BRAND_FILES[name]} 파일을 찾을 수 없습니다.", status=404)
+
 @app.route("/floorplan-img/<floor>")
 def floorplan_img(floor):
     from flask import send_file, Response
@@ -588,6 +613,7 @@ def api_status():
             "sim_mode":      state["sim_mode"],
             "names":         state["names"],
             "connecting":    state["connecting"],
+            "server_ip":     _lan_ip(),
         })
 
 @app.route("/api/connect", methods=["POST"])
@@ -1003,7 +1029,9 @@ _DASHBOARD_HTML = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Sphero PoC 브로커</title>
+<title>BANDI — 재난 대피 안내 브로커</title>
+<link rel="icon" type="image/png" href="/brand/favicon">
+<link rel="apple-touch-icon" href="/brand/symbol">
 <style>
 :root {
   --bg:   #0f1117;
@@ -1022,6 +1050,10 @@ body { background: var(--bg); color: var(--txt); font: 14px/1.6 'Pretendard', 'N
 
 header { padding: 14px 24px; border-bottom: 1px solid var(--bdr); display: flex; align-items: center; gap: 12px; }
 header h1 { font-size: 18px; font-weight: 700; }
+.brand-logo { height: 34px; width: auto; display: block; }
+.brand-sub { font-size: 12px; color: var(--dim); border-left: 1px solid var(--bdr); padding-left: 12px; line-height: 1.35; }
+.brand-sub b { color: var(--txt); font-weight: 600; }
+@media (max-width: 600px) { .brand-sub { display: none; } }
 .sim-badge { background: #78350f; color: #fde68a; font-size: 11px; padding: 2px 8px; border-radius: 4px; display: none; }
 
 .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; padding: 2px 20px 24px; }
@@ -1244,8 +1276,8 @@ kbd { background: var(--panel2); border: 1px solid var(--bdr); border-radius: 4p
 <body>
 
 <header>
-  <span style="font-size:22px;">🤖</span>
-  <h1>Sphero PoC 브로커 &nbsp;—&nbsp; 재난 대피 안내 로봇</h1>
+  <img class="brand-logo" src="/brand/logo" alt="BANDI">
+  <span class="brand-sub"><b>재난 대피 안내 로봇 · 중계기 대시보드</b><br>4조 잇다(ITDA) · 팔달관</span>
   <span class="sim-badge" id="simBadge">SIM</span>
   <span class="state-pill" id="statePill" title="시스템 상태">IDLE</span>
   <button class="hdr-btn" onclick="restartBroker()">↺ 브로커 재시작</button>
@@ -1435,6 +1467,13 @@ kbd { background: var(--panel2); border: 1px solid var(--bdr); border-radius: 4p
       <span id="connR2" style="font-weight:600;">연결 안됨</span>
       <span class="sub-label" id="batR2Txt">배터리 —</span>
     </div>
+    <div class="sub-label" style="margin-bottom:8px;">
+      앱 연결 주소
+      <code id="appUrl" title="눌러서 복사" onclick="copyAppUrl()"
+        style="cursor:pointer; color:var(--txt); background:var(--bg); border:1px solid var(--bdr);
+               border-radius:5px; padding:1px 7px; font:12px 'JetBrains Mono', monospace;">—</code>
+      <span id="appUrlCopied" style="color:var(--grn); display:none;">복사됨</span>
+    </div>
     <div class="path-steps" id="pathStepsR2"></div>
     <div class="sub-label" id="pathLabelR2" style="margin:6px 0 14px;">대기 중</div>
     <div class="follow-inner">
@@ -1601,6 +1640,23 @@ function renderFlow(d) {
     el.className = 'ex ' + v;
     el.querySelector('.est').textContent = v === 'triggered' ? '발생' : v === 'resolved' ? '처리됨' : '';
   });
+}
+
+function copyAppUrl() {
+  const url = document.getElementById('appUrl').textContent;
+  const done = () => {
+    const el = document.getElementById('appUrlCopied');
+    el.style.display = 'inline';
+    setTimeout(() => { el.style.display = 'none'; }, 1500);
+  };
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(url).then(done).catch(() => {});
+  } else {
+    const ta = document.createElement('textarea');
+    ta.value = url; document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); done(); } catch (e) {}
+    ta.remove();
+  }
 }
 
 function toggleFloorplan() {
@@ -1823,6 +1879,8 @@ function update() {
 
       updateFloorplan(d);
       renderFlow(d);
+      document.getElementById('appUrl').textContent =
+        `http://${d.server_ip}:${location.port || (location.protocol === 'https:' ? 443 : 80)}`;
 
       // counter
       document.getElementById('triggerCount').textContent = d.trigger_count;
