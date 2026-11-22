@@ -20,6 +20,7 @@ import json
 import logging
 import base64
 import queue as _queue
+import math
 import socket
 from datetime import datetime
 from flask import Flask, jsonify, render_template_string, request as flask_request
@@ -52,11 +53,11 @@ DEFAULT_SPEEDS = {
 }
 DEFAULT_TURN_PAUSE_SEC = 1.0 # 꺾기 전 정지 시간 — 멈춘 동안 매트릭스에 꺾는 방향 화살표 (0~10초)
 DEFAULT_R2_DIST_PCT = 100     # R2 거리 보정(%) — 폰 무게로 덜 가면 올림. 구간 시간에 곱해 같은 비율로 더 감 (50~200)
-DEFAULT_R2_DELAY_SEC = 3.0   # R2(후방)는 R1보다 이만큼 늦게 출발 — 대피자가 먼저 움직이고 R2가 뒤따름 (0~30초)
+DEFAULT_R2_DELAY_SEC = 0.0   # R2(후방) 출발 지연 — 0이면 R1과 동시 출발해 R1이 지나간 경로를 4m 뒤에서 따라감 (0~30초)
 SPEED_REF      = 100   # DRIVE_MPS를 잰 기준 속도 값
 DRIVE_MPS      = 0.8   # R1이 SPEED_REF로 1초에 가는 거리(m) — 현장 바닥에서 실측 후 수정
                        # 측정: 3초 직진시켜 이동 거리 ÷ 3. 구간 시간 = 거리 ÷ (이 값 × 속도/SPEED_REF)
-FOLLOW_GAP_M   = 4.0   # R1(전방)–R2(후방) 간격 — 사이에 대피자. R2는 경로 출발점, R1은 4m 앞에서 출발
+FOLLOW_GAP_M   = 4.0   # R1(전방)–R2(후방) 간격 기본값 — 대시보드에서 바꿈. R2는 경로 출발점, R1은 이만큼 앞에서 출발
 FOLLOW_END_GAP_M = 1.0 # 도착 때 R2가 R1 뒤에 남기는 간격 — R2는 출발 4m 차이를 따라잡아 R1 바로 뒤까지 간다
 
 # 2층 (현재 시연용): 중앙 복도 모서리(보이드 아래) 출발 → 직진 → 좌회전 → 계단(EXIT). 모든 재난 유형 공통
@@ -93,10 +94,29 @@ def _path_meters(path):
 ROUTE_2F_LEN = sum(m for _, m in ROUTE_2F_M)
 
 # 주행 단계: (속도, 헤딩, 지속 초, 매트릭스 표시 문자)
-# R1·R2는 같은 경로 위를 달려 같은 지점에서 꺾는다. R1은 4m 앞에서 출발, R2는 출발점에서 출발해 R1 정지점 1m 뒤까지 간다
+# R1·R2는 같은 경로 위를 달려 같은 지점에서 꺾는다. R1은 간격만큼 앞에서, R2는 출발점에서 출발해 R1 정지점 1m 뒤까지 간다
 # 지속 시간은 SPEED_REF 기준값 — 실제 주행 때 설정 속도에 맞춰 _run_path가 늘리거나 줄인다
-EVAC_PATH_2F = _route_to_path(_slice_route(ROUTE_2F_M, FOLLOW_GAP_M, ROUTE_2F_LEN), "v", DEFAULT_SPEEDS["floor2"])
-EVAC_PATH_R2 = _route_to_path(_slice_route(ROUTE_2F_M, 0, ROUTE_2F_LEN - FOLLOW_END_GAP_M), "v", DEFAULT_SPEEDS["rear"])
+def _build_follow_paths(route, gap):
+    """R2 출발점 기준 경로(route)에서 R1은 gap만큼 앞에서, R2는 출발점에서 같은 경로를 따라간다.
+    R2는 R1 정지점 min(1m, gap) 뒤까지 — R1이 꺾은 지점에서 똑같이 꺾는다"""
+    length = sum(m for _, m in route)
+    end_gap = min(FOLLOW_END_GAP_M, gap)
+    r1 = _route_to_path(_slice_route(route, gap, length), "v", DEFAULT_SPEEDS["floor2"])
+    r2 = _route_to_path(_slice_route(route, 0, length - end_gap), "v", DEFAULT_SPEEDS["rear"])
+    return r1, r2
+
+def _build_2f_paths(gap):
+    """간격(m)에 맞춘 2층 R1·R2 주행 단계"""
+    return _build_follow_paths(ROUTE_2F_M, gap)
+
+def _path_json(path):
+    return [{"step": i + 1, "char": ch, "speed": spd, "heading": hdg, "duration": dur,
+             "meters": round(dur * DRIVE_MPS, 2) if spd > 0 else 0}
+            for i, (spd, hdg, dur, ch) in enumerate(path)]
+
+GAP_MIN_M = 0.1                            # 10cm — 짧은 테스트용
+GAP_MAX_M = round(ROUTE_2F_LEN - 0.5, 1)   # R1이 최소 0.5m는 가야 함
+EVAC_PATH_2F, EVAC_PATH_R2 = _build_2f_paths(FOLLOW_GAP_M)
 EVAC_PATH_1F = _route_to_path(ROUTE_1F_M, "!", DEFAULT_SPEEDS["floor1"])    # 마지막: 정지 (비상구 도달)
 
 SPEED_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "speed_settings.json")
@@ -185,6 +205,7 @@ state = {
     "turn_pause": _load_setting("turn_pause", DEFAULT_TURN_PAUSE_SEC, 0, 10),
     "aim_trim": _load_aim_trim(),
     "r2_dist_pct": _load_setting("r2_dist_pct", DEFAULT_R2_DIST_PCT, 50, 200),
+    "follow_gap": _load_setting("follow_gap", FOLLOW_GAP_M, GAP_MIN_M, GAP_MAX_M),
     # 앱이 보낸 셀피 카메라 정면 방위 (자북 기준 시계 방향 도). quality: 1 = 폰 세움, 0 = 눕힘
     "phone": {"azimuth": None, "quality": 0.0, "accuracy": None, "ts": 0.0},
     # 나침반 자동 에임 진행 상태 (로봇별)
@@ -210,6 +231,15 @@ _trigger_lock    = threading.Lock()
 _broker_stop_evt = threading.Event()
 _trigger_ts      = 0.0
 _last_shake_ts   = 0.0
+_last_motion_end = 0.0  # 로봇이 마지막으로 멈춘 시각 — 직후엔 흔들기를 지진으로 보지 않음
+SHAKE_QUIET_SEC  = 3.0  # 주행·복귀가 끝나고 이 시간 동안은 흔들기 무시
+
+def _robots_in_motion() -> bool:
+    return any(state[k]["moving"] or state[k].get("returning") for k in ("floor2", "rear", "floor1"))
+
+def _mark_motion_end():
+    global _last_motion_end
+    _last_motion_end = time.time()
 _run_gen         = 0    # 트리거·리셋마다 증가 — 이전 세대 주행 스레드는 스스로 멈춘다
 
 def _lan_ip() -> str:
@@ -269,6 +299,10 @@ def trigger_signal(source: str = "unknown", disaster: str = None):
         mode = TARGET_MODES[state["target"]]
 
     d = DISASTERS[disaster]
+    with _trail_lock:
+        away = [_AIM_LABEL[k] for k, t in _trail.items() if t]
+    if away:
+        log_event(f"⚠ {', '.join(away)} 출발점이 아님 — 지금 위치에서 경로 시작 (먼저 '상황 해제'로 복귀 권장)")
     log_event(f"🚨 {d['icon']} {d['label']} 신호 수신 [{source}] — {d['src']}")
     log_event(f"  안내 대상: {mode['icon']} {mode['label']} · {mode['mps']} m/s · "
               f"LED {mode['led']} · 음성 {mode['voice']}")
@@ -346,17 +380,22 @@ def _run_2f_then_1f(gen):
 
     r1_on = _active("floor2")
     r2_on = _active("rear")
+    path_r1, path_r2 = _build_2f_paths(state["follow_gap"])
+    with _state_lock:
+        state["floor2"]["total_steps"] = len(path_r1)
+        state["rear"]["total_steps"]   = len(path_r2)
+    log_event(f"  R1·R2 간격 {state['follow_gap']*100:g}cm — R1 {sum(_path_meters(path_r1)):.1f}m · R2 {sum(_path_meters(path_r2)):.1f}m")
     if not r1_on and r2_on:
         raise_exception("E5", "R1 미연결 → R2가 R1 경로를 대신 선도")
     if not _active("floor1"):
         raise_exception("E5", "R3 미연결 → 1층 인수인계 불가")
     _set_phase("guiding")
     if r2_on:
-        threading.Thread(target=_run_r2_delayed, args=(gen, state["r2_delay"]), daemon=True).start()
+        threading.Thread(target=_run_r2_delayed, args=(gen, state["r2_delay"], path_r2), daemon=True).start()
     if r1_on or r2_on:
         if not r1_on:
             log_event("ℹ️  R1 미연결 — R2만 R1 경로를 따라 주행")
-        if not _run_path(_bolt_2f, EVAC_PATH_2F, "floor2", "2F",
+        if not _run_path(_bolt_2f, path_r1, "floor2", "2F",
                          move_color=(255, 80, 0), done_color=(255, 0, 0), gen=gen):
             return
         log_event("🏁 2F 계단 앞 도달 → 중계기가 R3에 출발 명령")
@@ -372,7 +411,695 @@ def _run_2f_then_1f(gen):
         log_event("🚪 R3 비상구 도달")
     _set_phase("complete")
 
-def _run_r2_delayed(gen, delay):
+# 로봇별 실제 주행 기록 [(헤딩, 속도, 초)] — 평시 복귀 때 역순·반대 방향으로 되짚는다
+_trail = {"floor2": [], "rear": [], "floor1": []}
+_trail_lock = threading.Lock()
+
+def _clear_trail(key=None):
+    with _trail_lock:
+        for k in ([key] if key else list(_trail)):
+            _trail[k] = []
+
+R2_UTURN_SPEED = 80    # R2 복귀 끝 U턴 속도 — 트롤리를 끌고 돌 만큼
+R2_UTURN_SEC   = 2.0   # R2 U턴 시간 — 짧을수록 작은 반원 (트롤리가 덜 돌면 늘림)
+R2_UTURN_STEPS = 12    # 반원을 나누는 회전 단계 수 (180° / 12 = 15°씩)
+
+R2_UTURN_COMP  = 1.0   # U턴 옆걸음 보정 배율 — 복귀 뒤 R2가 출발점 옆으로 비켜서면 조정 (U턴 방향 쪽이면 올림)
+
+def _mps(key, speed):
+    """속도 값 → 실제 m/s 추정 (R2는 거리 보정만큼 덜 감)"""
+    v = DRIVE_MPS * speed / SPEED_REF
+    if key == "rear":
+        v /= state["r2_dist_pct"] / 100
+    return v
+
+def _plan_return(key, trail):
+    """복귀 계획: 기록을 역순·반대 방향으로 되짚되, R2는 끝의 반원 U턴이 옆으로 옮겨 놓는 거리만큼
+    그 방향의 되짚기 구간을 미리 줄이거나 늘려 U턴 뒤 출발점에 서게 한다.
+    반환: ([(헤딩, 속도, 초, 원래 기록 초)], U턴 방향 +1 시계 / -1 반시계 / None)"""
+    legs = [((h + 180) % 360, spd, secs, secs) for h, spd, secs in reversed(trail)]
+    if key != "rear" or not legs:
+        return legs, None
+    start_h = legs[-1][0]
+    shift = 2 * _mps(key, R2_UTURN_SPEED) * R2_UTURN_SEC / math.pi * R2_UTURN_COMP   # 반원 지름
+    best = None
+    for sign in (-1, +1):
+        d_dir = (start_h + 90 * sign) % 360          # U턴이 로봇을 옮겨 놓는 방향
+        for i, (h, spd, secs, _) in enumerate(legs):
+            v = _mps(key, spd)
+            if h == d_dir and secs * v > shift + 0.1:
+                cand = (0, sign, i, -shift / v)      # 그 방향 구간을 줄임 (지나온 곳 안에서 해결 — 우선)
+            elif h == (d_dir + 180) % 360:
+                cand = (1, sign, i, shift / v)       # 반대 방향 구간을 늘림
+            else:
+                continue
+            if best is None or cand[0] < best[0]:
+                best = cand
+    if best is None:
+        return legs, +1
+    _, sign, i, dt = best
+    h, spd, secs, orig = legs[i]
+    legs[i] = (h, spd, round(secs + dt, 2), orig)
+    return legs, sign
+
+def _u_turn(bolt, from_heading, sign, gen):
+    """천천히 움직이며 반원을 그려 방향을 180° 바꾼다 — 제자리 회전과 달리 트롤리도 함께 돈다"""
+    step_sec = R2_UTURN_SEC / R2_UTURN_STEPS
+    for i in range(1, R2_UTURN_STEPS + 1):
+        if gen != _run_gen:
+            break
+        h = int(round(from_heading + sign * 180 * (i - 0.5) / R2_UTURN_STEPS)) % 360   # 구간 중간 각 → 대칭 반원 (Sphero는 정수 각만)
+        if bolt is not None:
+            bolt.drive_control.roll_start(h, R2_UTURN_SPEED)
+        time.sleep(step_sec)
+    if bolt is not None:
+        bolt.drive_control.roll_stop(int(round(from_heading + 180)) % 360)
+
+def _return_home_time(key, gen):
+    """기록한 주행을 거꾸로 되짚어 출발점으로 돌아가 원래 방향(0°)으로 선다"""
+    label = _AIM_LABEL[key]
+    bolt = {"floor2": _bolt_2f, "rear": _bolt_r2, "floor1": _bolt_1f}[key]
+    for _ in range(40):                      # 중단 중인 주행이 멈추고 기록을 마칠 때까지
+        if not state[key]["moving"]:
+            break
+        time.sleep(0.05)
+    with _trail_lock:
+        trail = list(_trail[key])
+    if sum(sec for _, _, sec in trail) <= 0:
+        return
+    legs, uturn = _plan_return(key, trail)
+    total = sum(secs for _, _, secs, _ in legs)
+    with _state_lock:
+        state[key]["returning"] = True
+        state[key]["return_secs"] = round(total + 0.5 * len(legs) + (R2_UTURN_SEC if uturn else 0), 1)
+    _set_led(bolt, 255, 255, 255)
+    log_event(f"↩ {label} 출발점으로 복귀 ({total:.1f}초 주행 되짚기"
+              + (f", U턴 {'오른쪽' if uturn > 0 else '왼쪽'} 반원 옆걸음 보정" if uturn else "") + ")")
+    try:
+        for back, speed, secs, orig in legs:
+            _set_matrix(bolt, 255, 255, 255, "^")
+            if bolt is not None and secs > 0:
+                bolt.drive_control.roll_start(back, speed)
+            t0 = time.time()
+            while time.time() - t0 < secs and gen == _run_gen:
+                time.sleep(0.05)
+            done = min(time.time() - t0, secs)
+            if bolt is not None:
+                bolt.drive_control.roll_stop(back)
+            with _trail_lock:
+                if _trail[key]:
+                    if done >= secs - 0.01:
+                        _trail[key].pop()
+                    else:                    # 복귀 중 새 재난 → 남은 만큼 기록에 남김
+                        h, spd, _ = _trail[key][-1]
+                        left = orig * (1 - done / secs) if secs else orig
+                        _trail[key][-1] = (h, spd, round(left, 2))
+            if gen != _run_gen:
+                log_event(f"↩ {label} 복귀 중단 (새 신호)")
+                return
+            time.sleep(0.5)
+        if uturn:                            # 트롤리: 거꾸로 끌려왔으므로 움직이며 반바퀴 돌아 원래 방향으로
+            _u_turn(bolt, legs[-1][0], uturn, gen)
+        elif bolt is not None:               # 원래 방향으로 제자리 회전
+            bolt.drive_control.roll_start(0, 0)
+            time.sleep(1.0)
+            bolt.drive_control.roll_stop(0)
+        _set_led(bolt, 0, 255, 0)
+        log_event(f"✅ {label} 출발점 복귀 완료")
+    except Exception as e:
+        log_event(f"↩ {label} 복귀 실패: {e}")
+    finally:
+        with _state_lock:
+            state[key]["returning"] = False
+        _mark_motion_end()
+
+# ── 위치 센서(locator) 기반 주행 ─────────────────────────────────────────────
+# BOLT가 알려 주는 자기 위치(cm, x = 오른쪽 + / y = 앞 +)를 보며 목표 지점까지 간다.
+# 시간으로만 가던 방식과 달리 미끄러짐·트롤리 무게·출발/정지 관성이 쌓이지 않고, 복귀는 좌표로 돌아간다.
+LOC_INTERVAL_MS    = 100    # 위치 스트리밍 주기 (ms)
+LOC_MAX_AGE        = 1.0    # 이보다 오래된 위치는 못 믿음 (초)
+NAV_STOP_CM        = 4.0    # 목표까지 이만큼 남으면 정지 — 굴러가는 관성 고려
+NAV_SLOW_CM        = 30.0   # 이 거리 안에서 감속
+NAV_MIN_SPEED      = 50     # 감속 하한 속도 값 — 이보다 낮으면 Sphero가 거의 안 움직임 (설정 속도가 더 낮으면 그 값)
+NAV_MAX_STEER_DEG  = 25     # 구간 방향에서 벗어나 보정할 수 있는 최대 각
+NAV_CALIB_CM       = 15.0   # 첫 구간에서 위치 좌표축 회전을 추정할 최소 이동 거리
+NAV_TIMEOUT_FACTOR = 3.0    # 예상 시간 × 이 값 + 3초가 지나도 도착 못 하면 다음 구간으로
+NAV_HOME_TOL_CM    = 8.0    # 복귀 때 이 안이면 도착으로 봄
+
+_ROBOT_KEYS = ("floor2", "rear", "floor1")
+_loc      = {k: None for k in _ROBOT_KEYS}                     # 원시 위치 (x, y cm, 받은 시각)
+_loc_rot  = {k: None for k in _ROBOT_KEYS}                     # 위치 좌표축 → 헤딩 좌표 회전(도), 첫 구간에서 추정
+_sim_pose = {k: [0.0, 0.0, 0, 0, time.time()] for k in _ROBOT_KEYS}  # SIM: x, y, 헤딩, 속도, 시각
+_wpts     = {k: [] for k in _ROBOT_KEYS}                       # 실제로 지난 지점 (헤딩 좌표 cm), [0] = 출발점
+_uturn_learned = {"shift_cm": None}                            # R2 U턴이 실제로 옆으로 옮긴 거리 (측정값)
+
+def _bolt_of(key):
+    return {"floor2": _bolt_2f, "rear": _bolt_r2, "floor1": _bolt_1f}[key]
+
+def _is_real(bolt):
+    return bolt is not None and hasattr(bolt, "reset_locator_x_and_y")
+
+def _vec(h):
+    return (math.sin(math.radians(h)), math.cos(math.radians(h)))
+
+def _angle_of(dx, dy):
+    return math.degrees(math.atan2(dx, dy)) % 360
+
+def _norm180(a):
+    return ((a + 180) % 360) - 180
+
+def _unrot(x, y, rot):
+    """위치 좌표축이 헤딩 좌표보다 rot도 돌아가 있을 때 헤딩 좌표로 되돌림"""
+    r = math.radians(rot)
+    return (x * math.cos(r) - y * math.sin(r), y * math.cos(r) + x * math.sin(r))
+
+def _make_loc_listener(key):
+    def _on(data):
+        loc = data.get("locator") if isinstance(data, dict) else None
+        if loc and "x" in loc and "y" in loc:
+            _loc[key] = (float(loc["x"]), float(loc["y"]), time.time())
+    return _on
+
+def _sim_advance(key):
+    p = _sim_pose[key]
+    now = time.time()
+    if p[3] > 0:
+        v = _mps(key, p[3]) * 100
+        dx, dy = _vec(p[2])
+        p[0] += dx * v * (now - p[4])
+        p[1] += dy * v * (now - p[4])
+    p[4] = now
+
+def _drive(key, bolt, heading, speed):
+    if not _is_real(bolt):
+        _sim_advance(key)
+        _sim_pose[key][2], _sim_pose[key][3] = heading % 360, speed
+    if bolt is not None:
+        bolt.drive_control.roll_start(int(heading) % 360, int(speed))
+
+def _halt(key, bolt, heading):
+    if not _is_real(bolt):
+        _sim_advance(key)
+        _sim_pose[key][3] = 0
+    if bolt is not None:
+        try:
+            bolt.drive_control.roll_stop(int(heading) % 360)
+        except Exception:
+            pass
+
+def _raw(key):
+    loc = _loc[key]
+    if loc is None or time.time() - loc[2] > LOC_MAX_AGE:
+        return None
+    return (loc[0], loc[1])
+
+def _pos(key, bolt):
+    """헤딩 좌표계 현재 위치 (cm). 아직 못 믿으면 None"""
+    if not _is_real(bolt):
+        _sim_advance(key)
+        return (_sim_pose[key][0], _sim_pose[key][1])
+    raw = _raw(key)
+    if raw is None or _loc_rot[key] is None:
+        return None
+    return _unrot(raw[0], raw[1], _loc_rot[key])
+
+def _nav_available(key, bolt):
+    return (not _is_real(bolt)) or _raw(key) is not None
+
+def _reset_origin(key, bolt):
+    """에임·연결 직후 — 지금 자리를 위치 원점으로"""
+    if _is_real(bolt):
+        try:
+            bolt.reset_locator_x_and_y()
+        except Exception as e:
+            log_event(f"  [위치 원점 리셋 오류] {e}")
+    _loc_rot[key] = None
+    _sim_pose[key][:4] = [0.0, 0.0, 0, 0]
+    with _trail_lock:
+        _wpts[key] = []
+        _trail[key] = []
+
+def _nav_to(key, bolt, ctx, target_of, heading, speed, cancelled, calib=True, hold=None):
+    """ctx["start"] 기준 목표점까지 heading 방향 구간을 위치를 보며 주행.
+    target_of(start) → 목표 (헤딩 좌표 cm). 반환 'ok' | 'cancel' | 'timeout' | 'noloc'"""
+    u = _vec(heading)
+    calib_from, deadline = None, None
+    while True:
+        if cancelled():
+            return "cancel"
+        if hold is not None and hold():           # 앞 로봇과 너무 가까움 → 멈춰 기다림
+            _halt(key, bolt, heading)
+            if deadline is not None:
+                deadline += 0.05
+            time.sleep(0.05)
+            continue
+        p = _pos(key, bolt)
+        if p is None:
+            raw = _raw(key)
+            if raw is None:
+                return "noloc"
+            if _loc_rot[key] is None and calib:       # 축 회전 추정: 구간 방향으로 직진하며 실제 이동 방향을 잰다
+                if calib_from is None:
+                    calib_from = raw
+                    deadline = time.time() + max(4.0, 0.3 / max(_mps(key, speed), 0.05) * 3)
+                dx, dy = raw[0] - calib_from[0], raw[1] - calib_from[1]
+                if math.hypot(dx, dy) >= NAV_CALIB_CM:
+                    rot = _norm180(_angle_of(dx, dy) - heading)
+                    _loc_rot[key] = rot
+                    log_event(f"  📐 {_AIM_LABEL[key]} 위치 좌표축 보정 {rot:+.0f}°")
+                    if ctx.get("start") is None and ctx.get("raw0") is not None:
+                        ctx["start"] = _unrot(ctx["raw0"][0], ctx["raw0"][1], rot)
+                    deadline = None              # 보정용 제한 시간 → 구간 제한 시간으로 다시 계산
+                    continue
+                if time.time() > deadline:
+                    return "noloc"
+                _drive(key, bolt, heading, speed)
+                time.sleep(0.05)
+                continue
+            return "noloc"
+        if ctx.get("start") is None:
+            ctx["start"] = p
+        tx, ty = target_of(ctx["start"])
+        rx, ry = tx - p[0], ty - p[1]
+        along = rx * u[0] + ry * u[1]
+        if deadline is None:
+            exp = max(along, 0) / 100 / max(_mps(key, speed), 0.05)
+            deadline = time.time() + exp * NAV_TIMEOUT_FACTOR + 3.0
+        if along <= NAV_STOP_CM:
+            return "ok"
+        if time.time() > deadline:
+            return "timeout"
+        dist = math.hypot(rx, ry)
+        dev = 0.0 if dist < 15 else max(-NAV_MAX_STEER_DEG, min(NAV_MAX_STEER_DEG, _norm180(_angle_of(rx, ry) - heading)))
+        spd = speed if along > NAV_SLOW_CM else max(min(NAV_MIN_SPEED, speed), int(speed * along / NAV_SLOW_CM))
+        _drive(key, bolt, round(heading + dev), spd)
+        time.sleep(0.05)
+
+def _run_path_nav(bolt, path, state_key, label, move_color, done_color, gen=None):
+    """위치 기반 경로 실행 — 구간 끝 지점을 좌표로 정해 놓고 도착할 때까지 보정하며 간다"""
+    def cancelled():
+        return gen is not None and gen != _run_gen
+
+    def mark(p):
+        with _trail_lock:
+            if not _wpts[state_key] and ctx.get("start") is not None:
+                _wpts[state_key].append(ctx["start"])     # 축 보정 뒤에야 출발점이 정해진 경우
+            if p is not None:
+                _wpts[state_key].append(p)
+
+    def finish(ok):
+        mark(_pos(state_key, bolt))
+        _halt(state_key, bolt, prev_heading or 0)
+        with _state_lock:
+            state[state_key]["moving"] = False
+            state[state_key]["step"]   = 0
+            if ok:
+                state[state_key]["done"] = True
+        _mark_motion_end()
+        if not ok:
+            log_event(f"⏹ {label} 주행 중단 (상황 해제)")
+        return ok
+
+    with _state_lock:
+        state[state_key]["moving"] = True
+        state[state_key]["done"]   = False
+        state[state_key]["step"]   = 0
+    _set_led(bolt, *move_color)
+    factor = TARGET_MODES[state["target"]]["mps"]
+    speed = min(255, int(state["speeds"][state_key] * factor))
+    turn_pause = state["turn_pause"]
+    meters = _path_meters(path)
+    offs = [(0.0, 0.0)]
+    for (spd, h, dur, ch), m in zip(path, meters):
+        if m > 0:
+            dx, dy = _vec(h)
+            offs.append((offs[-1][0] + dx * m * 100, offs[-1][1] + dy * m * 100))
+    ctx = {"start": _pos(state_key, bolt), "raw0": _raw(state_key) if _is_real(bolt) else None}
+    with _trail_lock:
+        if not _wpts[state_key] and ctx["start"] is not None:
+            _wpts[state_key].append(ctx["start"])
+    prev_heading, leg = None, 0
+    log_event(f"  📍 {label} 위치 기반 주행")
+
+    for i, (spd, heading, dur, char) in enumerate(path):
+        if cancelled():
+            return finish(False)
+        m = meters[i]
+        if m > 0 and prev_heading is not None and heading != prev_heading:
+            mark(_pos(state_key, bolt))
+            _halt(state_key, bolt, prev_heading)
+            if turn_pause > 0:
+                turn = (heading - prev_heading) % 360
+                _set_matrix(bolt, *move_color, _ARROW.get(turn, "^"))
+                log_event(f"  ↪ {label} {'좌' if turn == 270 else '우' if turn == 90 else ''}회전 전 {turn_pause:g}초 정지")
+                end = time.time() + turn_pause
+                while time.time() < end and not cancelled():
+                    time.sleep(0.05)
+                if cancelled():
+                    return finish(False)
+        with _state_lock:
+            state[state_key]["step"] = i + 1
+        _set_matrix(bolt, *move_color, "^" if m > 0 else char)
+        if m <= 0:
+            log_event(f"  → {label} 정지 (도착)  [{char}]")
+            continue
+        prev_heading = heading
+        log_event(f"  → {label} step {i+1}/{len(path)}: 속도={speed}  방향={heading}°  {m:g}m  [{char}]")
+        if i == 0 and state_key in ("floor2", "rear") and state["latency"] is None and not _test_running["on"]:
+            lat = round(time.time() - _trigger_ts, 2)
+            with _state_lock:
+                state["latency"] = lat
+            log_event(f"⏱ 트리거→선두 출발 {lat:.1f}s (목표 ≤ 2.0s)")
+        k = leg + 1
+        t0 = time.time()
+        res = _nav_to(state_key, bolt, ctx, lambda st, k=k: (st[0] + offs[k][0], st[1] + offs[k][1]),
+                      heading, speed, cancelled)
+        with _trail_lock:
+            _trail[state_key].append((heading, speed, round(time.time() - t0, 2)))
+        leg += 1
+        if res == "cancel":
+            return finish(False)
+        if res == "noloc":
+            log_event(f"⚠ {label} 위치 신호 끊김 — 남은 구간은 시간 기반")
+            raise_exception("E4", f"{label} 위치 센서 끊김")
+            if not _run_path_time(bolt, path[i + 1:], state_key, label, move_color, done_color, gen):
+                return False
+            return True
+        if res == "timeout":
+            log_event(f"⚠ {label} {m:g}m 구간 시간 초과 — 다음 구간으로")
+        p = _pos(state_key, bolt)
+        if p is not None and ctx.get("start") is not None:
+            tx, ty = ctx["start"][0] + offs[k][0], ctx["start"][1] + offs[k][1]
+            log_event(f"    {label} 구간 도착 오차 {math.hypot(tx - p[0], ty - p[1]):.0f}cm")
+
+    if cancelled():
+        return finish(False)
+    _set_led(bolt, *done_color)
+    floor_num = "1" if state_key == "floor1" else "2"
+    threading.Thread(target=_scroll_connected, args=(bolt, floor_num, *done_color), daemon=True).start()
+    finish(True)
+    log_event(f"✅ {label} 경로 완료")
+    return True
+
+def _run_path(bolt, path, state_key, label, move_color, done_color, gen=None):
+    """위치 센서가 있으면 위치 기반, 없으면 시간 기반"""
+    if _nav_available(state_key, bolt):
+        return _run_path_nav(bolt, path, state_key, label, move_color, done_color, gen)
+    log_event(f"  ⏱ {label} 위치 센서 없음 — 시간 기반 주행")
+    return _run_path_time(bolt, path, state_key, label, move_color, done_color, gen)
+
+def _return_home(key, gen):
+    """위치를 알면 지나온 지점을 거꾸로 거쳐 출발 좌표로, 모르면 시간 되짚기"""
+    try:
+        _return_home_inner(key, gen)
+    finally:
+        with _state_lock:
+            state[key]["returning"] = False
+
+def _return_home_inner(key, gen):
+    bolt = _bolt_of(key)
+    for _ in range(40):
+        if not state[key]["moving"]:
+            break
+        time.sleep(0.05)
+    with _trail_lock:
+        wpts = list(_wpts[key])
+    if len(wpts) >= 1 and _pos(key, bolt) is not None:
+        return _return_home_nav(key, gen)
+    return _return_home_time(key, gen)
+
+def _return_home_nav(key, gen):
+    label = _AIM_LABEL[key]
+    bolt = _bolt_of(key)
+    cancelled = lambda: gen != _run_gen
+    with _trail_lock:
+        wpts = list(_wpts[key])
+    home = wpts[0]
+    p = _pos(key, bolt)
+    if p is None or math.hypot(home[0] - p[0], home[1] - p[1]) < NAV_HOME_TOL_CM:
+        with _trail_lock:
+            _wpts[key] = [home] if p is None else []
+            _trail[key] = []
+        return
+    speed = min(255, state["speeds"][key])
+    path_pts = [w for w in reversed(wpts[1:])] + [home]
+    hold = None
+    if key == "floor2" and _active("rear"):
+        keep = min(FOLLOW_END_GAP_M, state["follow_gap"]) * 100 + 10
+        def hold():
+            if not state["rear"].get("returning"):
+                return False
+            a = _common("floor2", _pos("floor2", _bolt_2f))
+            b2 = _pos("rear", _bolt_r2)
+            return a is not None and b2 is not None and math.hypot(a[0] - b2[0], a[1] - b2[1]) < keep
+    # R2: 마지막에 반원 U턴 → U턴이 옆으로 옮길 만큼 미리 비켜선 지점까지만 간다
+    uturn = None
+    if key == "rear":
+        last_from = path_pts[-2] if len(path_pts) >= 2 else p
+        back = _angle_of(home[0] - last_from[0], home[1] - last_from[1])
+        shift = _uturn_learned["shift_cm"] or 2 * _mps(key, R2_UTURN_SPEED) * R2_UTURN_SEC / math.pi * 100 * R2_UTURN_COMP
+        best = None
+        for sign in (-1, +1):
+            dvx, dvy = _vec(back + 90 * sign)
+            pre = (home[0] - dvx * shift, home[1] - dvy * shift)
+            score = math.hypot(pre[0] - last_from[0], pre[1] - last_from[1])
+            if best is None or score < best[0]:
+                best = (score, sign, pre)
+        uturn = (best[1], best[2], shift, back)
+        bx, by = _vec(back)
+        lead_in = (best[2][0] - bx * 30, best[2][1] - by * 30)     # U턴 지점 30cm 앞
+        path_pts[-1:] = [lead_in, best[2]]
+    with _state_lock:
+        state[key]["returning"] = True
+        state[key]["return_secs"] = round(sum(
+            math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip([p] + path_pts[:-1], path_pts)) / 100
+            / max(_mps(key, speed), 0.05) + 0.5 * len(path_pts) + (R2_UTURN_SEC if uturn else 1), 1)
+    _set_led(bolt, 255, 255, 255)
+    log_event(f"↩ {label} 출발 좌표로 복귀 (위치 기반, 지점 {len(path_pts)}개"
+              + (f", U턴 {'오른쪽' if uturn[0] > 0 else '왼쪽'} {uturn[2]:.0f}cm 옆걸음 보정" if uturn else "") + ")")
+    try:
+        cur_h = None
+        for tgt in path_pts:
+            p = _pos(key, bolt)
+            if p is None:
+                log_event(f"⚠ {label} 위치 신호 끊김 — 복귀 중단")
+                return
+            if math.hypot(tgt[0] - p[0], tgt[1] - p[1]) < NAV_HOME_TOL_CM:
+                continue
+            h = _angle_of(tgt[0] - p[0], tgt[1] - p[1])
+            if cur_h is not None:
+                _halt(key, bolt, cur_h)
+                time.sleep(0.5)
+            _set_matrix(bolt, 255, 255, 255, "^")
+            res = _nav_to(key, bolt, {"start": (0.0, 0.0)}, lambda st, t=tgt: t, h, speed, cancelled,
+                          calib=False, hold=hold)
+            cur_h = h
+            if res == "cancel":
+                _halt(key, bolt, h)
+                log_event(f"↩ {label} 복귀 중단 (새 신호)")
+                return
+            if res != "ok":
+                log_event(f"⚠ {label} 복귀 지점 도착 실패 ({res})")
+        _halt(key, bolt, cur_h or 0)
+        if uturn:
+            before = _pos(key, bolt)
+            sign, start_h = uturn[0], uturn[3]
+            _u_turn(bolt, start_h, sign, gen)
+            if not _is_real(bolt):     # SIM: U턴을 반원 근사로 반영
+                dvx, dvy = _vec(start_h + 90 * sign)
+                _sim_pose[key][0] += dvx * uturn[2]
+                _sim_pose[key][1] += dvy * uturn[2]
+            time.sleep(0.3)
+            after = _pos(key, bolt)
+            if before is not None and after is not None:
+                moved = math.hypot(after[0] - before[0], after[1] - before[1])
+                if 10 < moved < 200:
+                    _uturn_learned["shift_cm"] = round(moved, 1)
+                    log_event(f"  📏 R2 U턴 실제 옆걸음 {moved:.0f}cm — 다음 복귀에 반영")
+        elif bolt is not None:
+            bolt.drive_control.roll_start(0, 0)
+            time.sleep(1.0)
+            bolt.drive_control.roll_stop(0)
+        p = _pos(key, bolt)
+        err = math.hypot(home[0] - p[0], home[1] - p[1]) if p else None
+        with _trail_lock:
+            _wpts[key] = []
+            _trail[key] = []
+        _set_led(bolt, 0, 255, 0)
+        log_event(f"✅ {label} 출발 좌표 복귀 완료" + (f" (오차 {err:.0f}cm)" if err is not None else ""))
+    except Exception as e:
+        log_event(f"↩ {label} 복귀 실패: {e}")
+    finally:
+        with _state_lock:
+            state[key]["returning"] = False
+        _mark_motion_end()
+
+# ── R2: R1 좌표 따라가기 ────────────────────────────────────────────────────
+# 공통 좌표 = R2 출발점 기준 (R1·R2는 같은 방향으로 에임, R1은 간격만큼 앞에 놓음).
+# R1이 실제로 지나간 자리를 발자국으로 남기고, R2는 경로 거리로 항상 간격만큼 뒤 지점을 쫓는다.
+FOLLOW_CRUMB_CM     = 3.0    # R1 발자국 간격
+FOLLOW_LOOKAHEAD_CM = 15.0   # R2가 바라보는 앞쪽 거리 — 작을수록 모서리를 정확히, 클수록 부드럽게
+FOLLOW_TOL_CM       = 4.0    # 목표 간격까지 이만큼 남으면 멈춤
+FOLLOW_STALL_SEC    = 15.0   # R1이 끝났는데 이만큼 진척이 없으면 종료
+
+def _common(key, p):
+    """각 로봇 좌표 → R2 출발점 기준 공통 좌표"""
+    if p is None:
+        return None
+    if key == "floor2":
+        return (p[0], p[1] + state["follow_gap"] * 100)
+    return p
+
+def _crumb_project(crumbs, p, idx):
+    """발자국 경로에서 p와 가장 가까운 점의 경로 거리 — 뒤로는 조금만 허용"""
+    best = (None, idx)
+    for i in range(max(0, idx - 2), min(len(crumbs) - 1, idx + 60)):
+        ax, ay, sa = crumbs[i]
+        bx, by, sb = crumbs[i + 1]
+        vx, vy = bx - ax, by - ay
+        l2 = vx * vx + vy * vy
+        t = 0.0 if l2 == 0 else max(0.0, min(1.0, ((p[0] - ax) * vx + (p[1] - ay) * vy) / l2))
+        qx, qy = ax + vx * t, ay + vy * t
+        d = math.hypot(p[0] - qx, p[1] - qy)
+        if best[0] is None or d < best[0][0]:
+            best = ((d, sa + (sb - sa) * t), i)
+    return (best[0][1] if best[0] else crumbs[idx][2]), best[1]
+
+def _crumb_point(crumbs, s_cm):
+    for i in range(len(crumbs) - 1):
+        ax, ay, sa = crumbs[i]
+        bx, by, sb = crumbs[i + 1]
+        if s_cm <= sb or i == len(crumbs) - 2:
+            t = 0.0 if sb == sa else max(0.0, min(1.0, (s_cm - sa) / (sb - sa)))
+            return (ax + (bx - ax) * t, ay + (by - ay) * t)
+    return crumbs[-1][:2]
+
+def _simplify(points, tol=6.0):
+    """더글러스-포커 — 촘촘한 실제 궤적을 꺾임점만 남김 (복귀 때 멈춤 최소화)"""
+    if len(points) < 3:
+        return list(points)
+    (ax, ay), (bx, by) = points[0], points[-1]
+    vx, vy = bx - ax, by - ay
+    l = math.hypot(vx, vy) or 1e-9
+    far, idx = 0.0, 0
+    for i, (x, y) in enumerate(points[1:-1], 1):
+        d = abs((x - ax) * vy - (y - ay) * vx) / l
+        if d > far:
+            far, idx = d, i
+    if far <= tol:
+        return [points[0], points[-1]]
+    return _simplify(points[:idx + 1], tol)[:-1] + _simplify(points[idx:], tol)
+
+def _calibrate_axes(key, bolt, heading, speed, cancelled):
+    """위치 좌표축 회전을 모를 때 heading 방향으로 15cm 곧게 가며 추정. 반환: 출발 위치(헤딩 좌표) 또는 None"""
+    raw0 = _raw(key)
+    if raw0 is None:
+        return None
+    deadline = time.time() + max(4.0, 0.3 / max(_mps(key, speed), 0.05) * 3)
+    while not cancelled() and time.time() < deadline:
+        raw = _raw(key)
+        if raw is None:
+            break
+        dx, dy = raw[0] - raw0[0], raw[1] - raw0[1]
+        if math.hypot(dx, dy) >= NAV_CALIB_CM:
+            _loc_rot[key] = _norm180(_angle_of(dx, dy) - heading)
+            log_event(f"  📐 {_AIM_LABEL[key]} 위치 좌표축 보정 {_loc_rot[key]:+.0f}°")
+            return _unrot(raw0[0], raw0[1], _loc_rot[key])
+        _drive(key, bolt, heading, speed)
+        time.sleep(0.05)
+    _halt(key, bolt, heading)
+    return None
+
+def _run_r2_follow(gen):
+    """R2가 R1 발자국을 간격만큼 뒤에서 따라감. R1이 끝나면 도착 간격까지 다가가 멈춤"""
+    key, bolt, label = "rear", _bolt_r2, "R2"
+    cancelled = lambda: gen != _run_gen
+    gap = state["follow_gap"] * 100
+    end_gap = min(FOLLOW_END_GAP_M, state["follow_gap"]) * 100
+    speed = min(255, int(state["speeds"][key] * TARGET_MODES[state["target"]]["mps"]))
+    p0 = _pos(key, bolt)
+    if p0 is None and _is_real(bolt) and _raw(key) is not None and _loc_rot[key] is None:
+        p0 = _calibrate_axes(key, bolt, 0, speed, cancelled)    # 0° = R1 출발점 쪽 (경로 위)
+    if p0 is None:
+        log_event(f"  ⏱ {label} 위치 센서 없음 — 계획 경로로 주행")
+        _, path_r2 = _build_2f_paths(state["follow_gap"])
+        return _run_path_time(bolt, path_r2, key, label, (255, 180, 0), (255, 0, 0), gen)
+    crumbs = [(p0[0], p0[1], 0.0), (p0[0], p0[1] + gap, gap)]      # R2 출발점 → R1 출발점
+    with _trail_lock:
+        if not _wpts[key]:
+            _wpts[key].append(p0)
+    track = [p0]
+    with _state_lock:
+        state[key].update(moving=True, done=False, step=1, progress_m=0.0)
+    _set_led(bolt, 255, 180, 0)
+    _set_matrix(bolt, 255, 180, 0, "^")
+    log_event(f"  📍 {label} R1 좌표 따라가기 — 간격 {gap:g}cm, 도착 간격 {end_gap:g}cm")
+    r2_s, idx, moving, last_s, last_t, cur_h = 0.0, 0, False, 0.0, time.time(), 0
+    ok, leader_seen, t_start = False, False, time.time()
+    while True:
+        if cancelled():
+            break
+        lp = _common("floor2", _pos("floor2", _bolt_2f))
+        if lp is not None and state["floor2"]["moving"]:
+            lx, ly, ls = crumbs[-1]
+            d = math.hypot(lp[0] - lx, lp[1] - ly)
+            if d >= FOLLOW_CRUMB_CM:
+                crumbs.append((lp[0], lp[1], ls + d))
+        if state["floor2"]["moving"]:
+            leader_seen = True
+        # R1이 실제로 출발한 걸 본 뒤에 멈추면 '끝'. 3초 안에 출발 안 하면 R1 없이 끝난 것으로
+        leader_done = (leader_seen and not state["floor2"]["moving"]) or (not leader_seen and time.time() - t_start > 3)
+        target_s = crumbs[-1][2] - (end_gap if leader_done else gap)
+        p = _pos(key, bolt)
+        if p is None:
+            log_event(f"⚠ {label} 위치 신호 끊김 — 따라가기 중단")
+            raise_exception("E4", f"{label} 위치 센서 끊김")
+            break
+        r2_s, idx = _crumb_project(crumbs, p, idx)
+        with _state_lock:
+            state[key]["progress_m"] = round(r2_s / 100, 2)
+            state["floor2"]["progress_m"] = round(crumbs[-1][2] / 100, 2)
+        if math.hypot(p[0] - track[-1][0], p[1] - track[-1][1]) >= 5:
+            track.append(p)
+        remaining = target_s - r2_s
+        if remaining > last_s + 1 or r2_s > last_s + 1:
+            last_s, last_t = r2_s, time.time()
+        if remaining <= FOLLOW_TOL_CM:
+            if moving:
+                _halt(key, bolt, cur_h)
+                moving = False
+            if leader_done:
+                ok = True
+                break
+            time.sleep(0.05)
+            continue
+        if leader_done and time.time() - last_t > FOLLOW_STALL_SEC:
+            log_event(f"⚠ {label} 진척 없음 — 따라가기 종료 (남은 {remaining:.0f}cm)")
+            break
+        tx, ty = _crumb_point(crumbs, min(r2_s + FOLLOW_LOOKAHEAD_CM, target_s))
+        cur_h = round(_angle_of(tx - p[0], ty - p[1]))
+        spd = speed if remaining > NAV_SLOW_CM else max(min(NAV_MIN_SPEED, speed), int(speed * remaining / NAV_SLOW_CM))
+        _drive(key, bolt, cur_h, spd)
+        moving = True
+        time.sleep(0.05)
+    _halt(key, bolt, cur_h)
+    p = _pos(key, bolt)
+    if p is not None:
+        track.append(p)
+    with _trail_lock:
+        _wpts[key] = [_wpts[key][0]] + _simplify(track)[1:] if _wpts[key] else _simplify(track)
+    with _state_lock:
+        state[key].update(moving=False, step=0, done=ok, progress_m=None)
+        state["floor2"]["progress_m"] = None
+    _mark_motion_end()
+    if ok:
+        _set_led(bolt, 255, 0, 0)
+        log_event(f"✅ {label} R1 뒤 {end_gap:g}cm 도착 (따라간 거리 {r2_s / 100:.2f}m)")
+    elif cancelled():
+        log_event(f"⏹ {label} 따라가기 중단 (상황 해제)")
+    return ok
+
+def _run_r2_delayed(gen, delay, path):
     """R2는 delay초 뒤 출발 — 대기 중 상황 해제되면 출발하지 않음"""
     if delay > 0:
         log_event(f"  R2 {delay:g}초 뒤 출발")
@@ -381,10 +1108,12 @@ def _run_r2_delayed(gen, delay):
             if gen != _run_gen:
                 return
             time.sleep(0.05)
-    _run_path(_bolt_r2, EVAC_PATH_R2, "rear", "R2",
+    if _active("floor2"):
+        return _run_r2_follow(gen)
+    _run_path(_bolt_r2, path, "rear", "R2",
               move_color=(255, 180, 0), done_color=(255, 0, 0), gen=gen)
 
-def _run_path(bolt, path, state_key, label, move_color, done_color, gen=None):
+def _run_path_time(bolt, path, state_key, label, move_color, done_color, gen=None):
     """범용 경로 실행 — 2F/1F 공통. 상황 해제(세대 변경) 시 멈추고 False 반환"""
     def cancelled():
         return gen is not None and gen != _run_gen
@@ -398,6 +1127,7 @@ def _run_path(bolt, path, state_key, label, move_color, done_color, gen=None):
         with _state_lock:
             state[state_key]["moving"] = False
             state[state_key]["step"]   = 0
+        _mark_motion_end()
         log_event(f"⏹ {label} 주행 중단 (상황 해제)")
         return False
 
@@ -409,9 +1139,8 @@ def _run_path(bolt, path, state_key, label, move_color, done_color, gen=None):
     _set_led(bolt, *move_color)
     factor = TARGET_MODES[state["target"]]["mps"]
     with _state_lock:
-        my_speed   = state["speeds"][state_key]
-        lead_speed = state["speeds"]["floor1" if state_key == "floor1" else "floor2"]
-    time_scale = SPEED_REF / lead_speed
+        my_speed = state["speeds"][state_key]
+    time_scale = SPEED_REF / my_speed        # 각자 자기 속도로 환산 → 속도를 바꿔도 정해진 거리만 간다
     if state_key == "rear":
         time_scale *= state["r2_dist_pct"] / 100
     turn_pause = state["turn_pause"]
@@ -452,14 +1181,17 @@ def _run_path(bolt, path, state_key, label, move_color, done_color, gen=None):
                 except Exception as e:
                     log_event(f"  [이동 오류] {e}")
                     raise_exception("E4", f"{label} 명령 실패 — 남은 경로 계속 진행")
-            if i == 0 and state_key in ("floor2", "rear") and state["latency"] is None:
+            if i == 0 and state_key in ("floor2", "rear") and state["latency"] is None and not _test_running["on"]:
                 lat = round(time.time() - _trigger_ts, 2)
                 with _state_lock:
                     state["latency"] = lat
                 log_event(f"⏱ 트리거→선두 출발 {lat:.1f}s (목표 ≤ 2.0s)")
-            end = time.time() + duration
+            t0 = time.time()
+            end = t0 + duration
             while time.time() < end and not cancelled():
                 time.sleep(0.05)
+            with _trail_lock:
+                _trail[state_key].append((heading, speed, round(min(time.time() - t0, duration), 2)))
         else:
             log_event(f"  → {label} 정지 (핸드오프 포인트)  [{char}]")
             if bolt is not None:
@@ -478,6 +1210,7 @@ def _run_path(bolt, path, state_key, label, move_color, done_color, gen=None):
         state[state_key]["moving"] = False
         state[state_key]["done"]   = True
         state[state_key]["step"]   = 0
+    _mark_motion_end()
 
     log_event(f"✅ {label} 경로 완료")
     return True
@@ -497,6 +1230,8 @@ def _on_2f_sensor(data: dict):
 
         magnitude = (ax**2 + ay**2 + az**2) ** 0.5
         if magnitude > SHAKE_THRESHOLD:
+            if _robots_in_motion() or time.time() - _last_motion_end < SHAKE_QUIET_SEC:
+                return   # 로봇 자신의 주행·회전·충돌 — 지진 아님
             global _last_shake_ts
             _last_shake_ts = time.time()
             trigger_signal(f"2F-shake({magnitude:.1f}G)", "quake")
@@ -576,6 +1311,7 @@ def _broker_main(sim: bool):
         state["rear"]["connected"]   = bool(toy_r2)
         state["connecting"] = False
         state["aim"] = {k: {"status": "", "msg": ""} for k in ("floor2", "rear", "floor1")}
+    _clear_trail()
 
     connected = [f for f, t in [("2F", toy_2f), ("1F", toy_1f), ("R2", toy_r2)] if t]
     skipped   = [f for f, n in [("2F", name_2f), ("1F", name_1f), ("R2", name_r2)] if not n]
@@ -634,14 +1370,24 @@ def _broker_main(sim: bool):
             ).start()
             log_event(f"💡 {floor} 매트릭스 'Floor {num}' 스크롤 시작")
 
-        # 2F 가속도 센서 스트리밍 (sensor_control 고수준 API)
-        try:
-            b2.sensor_control.set_interval(200)
-            b2.sensor_control.enable('accelerometer')
-            b2.sensor_control.add_sensor_data_listener(_on_2f_sensor)
-            log_event("📡 2F 가속도 센서 스트리밍 시작 (흔들면 신호)")
-        except Exception as e:
-            log_event(f"⚠ 센서 스트리밍 불가: {e} — 대시보드 버튼으로 트리거 가능")
+        # 센서 스트리밍: R1 가속도(흔들기 = 지진) + 세 로봇 위치(locator)
+        for bolt, key in ((b2, "floor2"), (br, "rear"), (b1, "floor1")):
+            if not _is_real(bolt):
+                continue
+            try:
+                if hasattr(bolt, "set_locator_flags"):
+                    bolt.set_locator_flags(False)
+                bolt.sensor_control.set_interval(LOC_INTERVAL_MS)
+                if key == "floor2":
+                    bolt.sensor_control.enable('accelerometer', 'locator')
+                    bolt.sensor_control.add_sensor_data_listener(_on_2f_sensor)
+                else:
+                    bolt.sensor_control.enable('locator')
+                bolt.sensor_control.add_sensor_data_listener(_make_loc_listener(key))
+                _reset_origin(key, bolt)
+                log_event(f"📡 {_AIM_LABEL[key]} 위치 센서 스트리밍 시작" + (" + 가속도(흔들면 지진)" if key == "floor2" else ""))
+            except Exception as e:
+                log_event(f"⚠ {_AIM_LABEL[key]} 센서 스트리밍 불가: {e} — 시간 기반으로 주행")
 
         log_event("🟢 브로커 준비 완료 — 신호 대기 중")
 
@@ -736,6 +1482,12 @@ def api_status():
             "turn_pause":    state["turn_pause"],
             "aim_trim":      state["aim_trim"],
             "r2_dist_pct":   state["r2_dist_pct"],
+            "follow_gap":    state["follow_gap"],
+            "test_running":  _test_running["on"],
+            "positions":     {k: (lambda p: {"x": round(p[0]), "y": round(p[1])} if p else None)(_pos(k, _bolt_of(k)))
+                              for k in _ROBOT_KEYS},
+            "paths":         dict(zip(("floor2", "rear"),
+                                      map(_path_json, _build_2f_paths(state["follow_gap"])))),
         })
 
 @app.route("/api/connect", methods=["POST"])
@@ -774,12 +1526,70 @@ def api_trigger():
     trigger_signal("대시보드-수동")
     return jsonify({"ok": True})
 
+TEST_ROUTE_M = [(0, 1.0), (270, 1.0)]   # 테스트: R1 기준 직진 1m → 좌회전 1m (ㄱ자). R2는 간격만큼 뒤에서 같은 경로
+_test_running = {"on": False}
+
+def _test_paths(gap):
+    """테스트 경로 — R1·R2는 실제 2층과 같은 따라가기 구조, R3는 혼자 ㄱ자"""
+    route = [(TEST_ROUTE_M[0][0], gap + TEST_ROUTE_M[0][1])] + TEST_ROUTE_M[1:]   # R2 출발점 기준
+    r1, r2 = _build_follow_paths(route, gap)
+    return {"floor2": r1, "rear": r2, "floor1": _route_to_path(TEST_ROUTE_M, "v", DEFAULT_SPEEDS["floor1"])}
+
+def _run_test_path(key, gen, path):
+    label = _AIM_LABEL[key]
+    bolt = {"floor2": _bolt_2f, "rear": _bolt_r2, "floor1": _bolt_1f}[key]
+    try:
+        if key == "rear" and _active("floor2"):
+            _run_r2_follow(gen)
+            return
+        _run_path(bolt, path, key, f"{label}(테스트)", move_color=(0, 200, 255), done_color=(0, 255, 0), gen=gen)
+    finally:
+        with _state_lock:
+            state[key]["done"] = False      # 실제 경로 '도착'으로 표시되지 않게
+            if not any(state[k]["moving"] for k in ("floor2", "rear", "floor1")):
+                _test_running["on"] = False
+
+@app.route("/api/test_route", methods=["POST"])
+def api_test_route():
+    """테스트 경로 — 연결된 로봇마다 제자리에서 직진 1m → 좌회전 1m. 상황 해제로 출발점 복귀"""
+    global _run_gen
+    keys = [k for k in ("floor2", "rear", "floor1") if _active(k)]
+    if not keys:
+        return jsonify({"ok": False, "error": "연결된 로봇 없음"}), 400
+    if _robots_in_motion():
+        return jsonify({"ok": False, "error": "주행·복귀 중 — 끝난 뒤 실행"}), 409
+    with _trigger_lock:
+        _run_gen += 1
+        gen = _run_gen
+    with _state_lock:
+        _test_running["on"] = True
+    names = ", ".join(_AIM_LABEL[k] for k in keys)
+    paths = _test_paths(state["follow_gap"])
+    desc = lambda k: " → ".join(f"{'직진' if h == 0 else '좌회전' if h == 270 else '우회전'} {m:g}m"
+                                for (h, m) in [(p[1], mm) for p, mm in zip(paths[k], _path_meters(paths[k])) if mm])
+    for k in keys:
+        if k == "rear" and "floor2" in keys:
+            log_event(f"  R2(테스트): R1 좌표를 {state['follow_gap'] * 100:g}cm 뒤에서 따라감")
+        else:
+            log_event(f"  {_AIM_LABEL[k]}(테스트): {desc(k) or '이동 없음'}")
+    log_event(f"🧪 테스트 경로 시작 ({names}) — 직진 {TEST_ROUTE_M[0][1]:g}m → 좌회전 {TEST_ROUTE_M[1][1]:g}m")
+    for k in keys:
+        threading.Thread(target=_run_test_path, args=(k, gen, paths[k]), daemon=True).start()
+    return jsonify({"ok": True, "robots": names})
+
 @app.route("/api/disaster", methods=["POST"])
 def api_disaster():
     kind = (flask_request.get_json(silent=True) or {}).get("type")
     if kind == "clear":
         api_reset()
         log_event("🟢 상황 해제 — 전 로봇 평시 복귀")
+        gen = _run_gen
+        if _active("rear"):
+            with _state_lock:
+                state["rear"]["returning"] = True      # R1이 R2보다 먼저 움직이지 않게
+        for k in ("floor2", "rear", "floor1"):
+            if _active(k):
+                threading.Thread(target=_return_home, args=(k, gen), daemon=True).start()
         return jsonify({"ok": True})
     if kind not in DISASTERS:
         return jsonify({"ok": False, "error": "unknown type"}), 400
@@ -1036,8 +1846,8 @@ def api_aim():
         return jsonify({"ok": True, "heading": _aim_heading[key]})
     if not _active(key):
         return jsonify({"ok": False, "error": f"{label} 미연결"}), 400
-    if state[key]["moving"]:
-        return jsonify({"ok": False, "error": f"{label} 주행 중 — 끝난 뒤 보정"}), 409
+    if state[key]["moving"] or state[key].get("returning"):
+        return jsonify({"ok": False, "error": f"{label} 주행·복귀 중 — 끝난 뒤 보정"}), 409
     bolt = {"floor2": _bolt_2f, "rear": _bolt_r2, "floor1": _bolt_1f}[key]
     try:
         if action == "start":
@@ -1055,6 +1865,7 @@ def api_aim():
                 bolt.drive_control.reset_heading()
             offset = _aim_heading[key]
             _aim_heading[key] = 0
+            _reset_origin(key, bolt)
             _set_led(bolt, 0, 255, 0)
             if state["aim"][key]["status"] == "done" and offset:
                 # 자동 에임 결과에서 손으로 더 돌린 만큼 → 다음 자동 에임에 미리 더함
@@ -1082,7 +1893,7 @@ def _save_settings():
     with _state_lock:
         data = {**state["speeds"], "r2_delay": state["r2_delay"],
                 "turn_pause": state["turn_pause"], "aim_trim": state["aim_trim"],
-                "r2_dist_pct": state["r2_dist_pct"]}
+                "r2_dist_pct": state["r2_dist_pct"], "follow_gap": state["follow_gap"]}
     try:
         with open(SPEED_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f)
@@ -1103,6 +1914,14 @@ def api_speeds():
             if not 1 <= v <= 255:
                 return jsonify({"ok": False, "error": f"{_AIM_LABEL[k]} 속도는 1~255"}), 400
             new[k] = v
+    gap = state["follow_gap"]
+    if "follow_gap" in data:
+        try:
+            gap = round(float(data["follow_gap"]), 2)
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "간격이 숫자가 아님"}), 400
+        if not GAP_MIN_M <= gap <= GAP_MAX_M:
+            return jsonify({"ok": False, "error": f"간격은 {GAP_MIN_M*100:g}~{GAP_MAX_M*100:g}cm"}), 400
     dist_pct = state["r2_dist_pct"]
     if "r2_dist_pct" in data:
         try:
@@ -1132,9 +1951,11 @@ def api_speeds():
         state["r2_delay"] = delay
         state["turn_pause"] = pause
         state["r2_dist_pct"] = dist_pct
+        state["follow_gap"] = gap
     _save_settings()
-    log_event(f"⚙ 주행 속도 — R1 {new['floor2']} · R2 {new['rear']} (출발 {delay:g}초 지연, 거리 {dist_pct:g}%) · R3 {new['floor1']} · 꺾기 전 {pause:g}초 정지 (다음 주행부터)")
-    return jsonify({"ok": True, "speeds": new, "r2_delay": delay, "turn_pause": pause, "r2_dist_pct": dist_pct})
+    log_event(f"⚙ 주행 속도 — R1 {new['floor2']} · R2 {new['rear']} (출발 {delay:g}초 지연, 거리 {dist_pct:g}%) · R3 {new['floor1']} · 꺾기 전 {pause:g}초 정지 · 간격 {gap*100:g}cm (다음 주행부터)")
+    return jsonify({"ok": True, "speeds": new, "r2_delay": delay, "turn_pause": pause, "r2_dist_pct": dist_pct,
+                    "follow_gap": gap})
 
 @app.route("/api/phone/heading", methods=["POST"])
 def api_phone_heading():
@@ -1197,6 +2018,7 @@ def _auto_aim(key, azimuth):
             if hasattr(bolt.drive_control, "reset_heading"):
                 bolt.drive_control.reset_heading()
         _aim_heading[key] = 0
+        _reset_origin(key, bolt)
         _set_led(bolt, 0, 255, 0)
         msg = f"완료 · 북 {north}° + 셀피 {azimuth:.0f}°" + (f" + 보정 {trim:+d}°" if trim else "")
         _set_aim_status(key, "done", msg)
@@ -1584,6 +2406,8 @@ header h1 { font-size: 18px; font-weight: 700; }
 .dz.black.on { border-color: var(--black); background: rgba(251,191,36,.14);  color: var(--black); }
 .dz-clear { grid-column: 1/-1; background: transparent; font-size: 12.5px; }
 .dz-clear:hover { border-color: var(--ok); color: var(--ok); }
+.dz-test { border-style: dashed; }
+.dz-test:hover { border-color: var(--blue2); color: var(--blue2); }
 
 .seg { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
 .seg button { appearance: none; border: 1px solid var(--bdr); background: var(--panel2); color: var(--ink2);
@@ -1701,6 +2525,7 @@ kbd { background: var(--panel2); border: 1px solid var(--bdr); border-radius: 4p
         <button class="dz quake" id="dzquake" onclick="sendDisaster('quake')"><span class="ico">🌍</span>지진<small>가속도계 감지</small></button>
         <button class="dz black" id="dzblack" onclick="sendDisaster('black')"><span class="ico">💡</span>정전<small>조도 센서 감지</small></button>
         <button class="dz dz-clear" onclick="sendDisaster('clear')">상황 해제 · 평시 복귀</button>
+        <button class="dz dz-clear dz-test" onclick="testRoute()">🧪 테스트 경로 — ㄱ자 (직진 1m → 좌회전 1m)</button>
       </div>
       <div class="note" id="triggerNote"></div>
     </div>
@@ -1876,12 +2701,13 @@ kbd { background: var(--panel2); border: 1px solid var(--bdr); border-radius: 4p
       <div class="field"><label>R2 출발 지연 (초)</label><input id="spd_r2delay" type="number" min="0" max="30" step="0.5"></div>
       <div class="field"><label>꺾기 전 정지 (초)</label><input id="spd_turnpause" type="number" min="0" max="10" step="0.5"></div>
       <div class="field"><label>R2 거리 보정 (%) — 덜 가면 올림</label><input id="spd_r2dist" type="number" min="50" max="200" step="1"></div>
+      <div class="field"><label>전방–후방 간격 (cm) — R1이 R2보다 앞에서 출발</label><input id="spd_gap" type="number" min="10" max="1400" step="10"></div>
     </div>
     <div class="btn-row" style="margin-top:0;">
       <button class="btn btn-connect" onclick="saveSpeeds()">💾 속도 저장</button>
-      <button class="btn btn-reset" onclick="resetSpeeds()">기본값 (100 · 150 · 100 · 3초 · 1초 · 100%)</button>
+      <button class="btn btn-reset" onclick="resetSpeeds()">기본값 (100 · 150 · 100 · 0초 · 1초 · 100% · 400cm)</button>
     </div>
-    <p class="connect-hint" id="speedHint">구간 시간은 R1(2층)·R3(1층) 속도로 계산. R2는 R1 시간표를 따르고 출력만 R2 값 — R2 실제 속도가 R1과 같아야 4m 간격 유지.</p>
+    <p class="connect-hint" id="speedHint">각 로봇은 자기 속도로 구간 시간을 계산해 정해진 거리만큼만 간다. R2가 R1보다 빠르면 간격이 줄고 느리면 벌어진다 — 간격 유지는 실제 속도를 비슷하게.</p>
   </div>
 
   <!-- 방향 보정 -->
@@ -1909,7 +2735,7 @@ kbd { background: var(--panel2); border: 1px solid var(--bdr); border-radius: 4p
       </div>
 ''' for key, lbl, desc in [
         ("rear",   "R2", "경로 출발점 · 셀피 카메라가 진행 방향(첫 구간)을 보게"),
-        ("floor2", "R1", "R2에서 경로 따라 4m 앞 · 셀피 정면과 같은 방향"),
+        ("floor2", "R1", "R2에서 경로 따라 간격(기본 400cm)만큼 앞 · 셀피 정면과 같은 방향"),
         ("floor1", "R3", "1층 출발점 · 1층 첫 구간(로비 쪽) 방향"),
     ]) + r"""    </div>
     <p class="connect-hint" id="aimHint">자동 에임 뒤 살짝 틀어졌으면: 그 로봇만 보정 시작 → ⟲/⟳ 1°·5°로 맞추고 0°로 저장 (나침반 재측정 없음). 수동: 보정 시작 → 꼬리 LED(파랑)가 켜짐. 화살표로 돌려 <b>꼬리 LED가 셀피 정면의 정반대</b>를 향하게(= 로봇 정면이 셀피 정면) 맞춘 뒤 0°로 저장. 경로의 모든 회전은 이 방향 기준.</p>
@@ -1975,7 +2801,7 @@ kbd { background: var(--panel2); border: 1px solid var(--bdr); border-radius: 4p
 </footer>
 
 <script>
-const PATH_2F = """ + json.dumps([
+let PATH_2F = """ + json.dumps([
     {"step": i+1, "char": char, "speed": spd, "heading": hdg, "duration": dur, "meters": round(dur * DRIVE_MPS, 2) if spd > 0 else 0}
     for i, (spd, hdg, dur, char) in enumerate(EVAC_PATH_2F)
 ]) + r""";
@@ -1983,7 +2809,7 @@ const PATH_1F = """ + json.dumps([
     {"step": i+1, "char": char, "speed": spd, "heading": hdg, "duration": dur, "meters": round(dur * DRIVE_MPS, 2) if spd > 0 else 0}
     for i, (spd, hdg, dur, char) in enumerate(EVAC_PATH_1F)
 ]) + r""";
-const PATH_R2 = """ + json.dumps([
+let PATH_R2 = """ + json.dumps([
     {"step": i+1, "char": char, "speed": spd, "heading": hdg, "duration": dur, "meters": round(dur * DRIVE_MPS, 2) if spd > 0 else 0}
     for i, (spd, hdg, dur, char) in enumerate(EVAC_PATH_R2)
 ]) + r""";
@@ -2008,6 +2834,18 @@ function postJSON(url, body) {
     .then(() => update()).catch(console.error);
 }
 function sendDisaster(type) { postJSON('/api/disaster', { type }); }
+function testRoute() {
+  fetch('/api/test_route', { method: 'POST' })
+    .then(r => r.json())
+    .then(j => {
+      const note = document.getElementById('triggerNote');
+      note.innerHTML = j.ok
+        ? `<b>🧪 테스트 경로</b> — ${j.robots} R1 직진 1m → 좌회전 1m, R2는 간격만큼 뒤에서 R1이 꺾은 곳에서 꺾음 (이벤트 로그에 구간 표시). 끝나면 '상황 해제'로 출발점 복귀`
+        : '⚠ ' + j.error;
+      update();
+    })
+    .catch(console.error);
+}
 function setTarget(mode)    { postJSON('/api/target', { mode }); }
 function fireException(id)  { postJSON('/api/exception', { id }); }
 
@@ -2028,6 +2866,7 @@ function robotPhase(r, d) {
   const ph = d.phase;
   if (!r.key) return d.exceptions.E5 === 'triggered' ? '투입 요청' : '예비 대기';
   const s = d[r.key];
+  if (s.returning) return '복귀 중';
   if (r.key === 'floor1') {
     if (ph === 'idle') return 'IDLE';
     if (ph === 'armed' || ph === 'guiding') return 'ARMED';
@@ -2077,7 +2916,7 @@ function renderFlow(d) {
     const ballStyle = lit ? `color:${r.color};box-shadow:inset 0 0 0 1px ${r.color}` : online ? 'color:#6b7785' : '';
     return `<div class="bot ${fall ? 'fall' : st.toLowerCase()}">
       <div class="rball" style="${ballStyle}">${r.id}</div>
-      <div style="min-width:0"><div class="n">${r.name} <span>· ${conn}</span></div><div class="s">${r.role}</div></div>
+      <div style="min-width:0"><div class="n">${r.name} <span>· ${conn}${(r.key && d.positions && d.positions[r.key]) ? ` · 📍 ${d.positions[r.key].x}, ${d.positions[r.key].y}cm` : ''}</span></div><div class="s">${r.role}</div></div>
       <div class="st">${st}</div></div>`;
   }).join('');
 
@@ -2144,6 +2983,7 @@ const SPEED_KEYS = ['floor2', 'rear', 'floor1'];
 const DEFAULT_R2_DELAY = """ + str(DEFAULT_R2_DELAY_SEC) + r""";
 const DEFAULT_TURN_PAUSE = """ + str(DEFAULT_TURN_PAUSE_SEC) + r""";
 const DEFAULT_R2_DIST = """ + str(DEFAULT_R2_DIST_PCT) + r""";
+const DEFAULT_GAP = """ + str(FOLLOW_GAP_M) + r""";
 function renderSpeeds(d) {
   if (!d.speeds) return;
   speeds = d.speeds;
@@ -2157,6 +2997,8 @@ function renderSpeeds(d) {
   if (!tp.dataset.touched && d.turn_pause != null) tp.value = d.turn_pause;
   const rd = document.getElementById('spd_r2dist');
   if (!rd.dataset.touched && d.r2_dist_pct != null) rd.value = d.r2_dist_pct;
+  const gp = document.getElementById('spd_gap');
+  if (!gp.dataset.touched && d.follow_gap != null) gp.value = Math.round(d.follow_gap * 100);
 }
 function postSpeeds(body) {
   const hint = document.getElementById('speedHint');
@@ -2168,10 +3010,11 @@ function postSpeeds(body) {
       const dl = document.getElementById('spd_r2delay'); delete dl.dataset.touched; dl.value = j.r2_delay;
       const tp = document.getElementById('spd_turnpause'); delete tp.dataset.touched; tp.value = j.turn_pause;
       const rd = document.getElementById('spd_r2dist'); delete rd.dataset.touched; rd.value = j.r2_dist_pct;
+      const gp = document.getElementById('spd_gap'); delete gp.dataset.touched; gp.value = Math.round(j.follow_gap * 100);
       const t2 = (PATH_2F.reduce((a, p) => a + p.duration, 0) * SPEED_REF / j.speeds.floor2).toFixed(1);
       const t1 = (PATH_1F.reduce((a, p) => a + p.duration, 0) * SPEED_REF / j.speeds.floor1).toFixed(1);
       hint.style.color = '';
-      hint.textContent = `✔ 저장됨 — R1 ${j.speeds.floor2} · R2 ${j.speeds.rear} (${j.r2_delay}초 뒤 출발, 거리 ${j.r2_dist_pct}%) · R3 ${j.speeds.floor1} · 꺾기 전 ${j.turn_pause}초 정지 · 예상 2층 ${t2}초 / 1층 ${t1}초 (일반 모드)`;
+      hint.textContent = `✔ 저장됨 — R1 ${j.speeds.floor2} · R2 ${j.speeds.rear} (${j.r2_delay}초 뒤 출발, 거리 ${j.r2_dist_pct}%) · R3 ${j.speeds.floor1} · 꺾기 전 ${j.turn_pause}초 정지 · 간격 ${Math.round(j.follow_gap * 100)}cm · 예상 2층 ${t2}초 / 1층 ${t1}초 (일반 모드)`;
       update();
     })
     .catch(e => { hint.textContent = '⚠ 요청 실패: ' + e; hint.style.color = 'var(--red)'; });
@@ -2182,10 +3025,11 @@ function saveSpeeds() {
   body.r2_delay = parseFloat(document.getElementById('spd_r2delay').value);
   body.turn_pause = parseFloat(document.getElementById('spd_turnpause').value);
   body.r2_dist_pct = parseFloat(document.getElementById('spd_r2dist').value);
+  body.follow_gap = parseFloat(document.getElementById('spd_gap').value) / 100;   // cm → m
   postSpeeds(body);
 }
-function resetSpeeds() { postSpeeds(Object.assign({}, DEFAULT_SPEEDS, { r2_delay: DEFAULT_R2_DELAY, turn_pause: DEFAULT_TURN_PAUSE, r2_dist_pct: DEFAULT_R2_DIST })); }
-SPEED_KEYS.concat(['r2delay', 'turnpause', 'r2dist']).forEach(k => document.getElementById('spd_' + k)
+function resetSpeeds() { postSpeeds(Object.assign({}, DEFAULT_SPEEDS, { r2_delay: DEFAULT_R2_DELAY, turn_pause: DEFAULT_TURN_PAUSE, r2_dist_pct: DEFAULT_R2_DIST, follow_gap: DEFAULT_GAP })); }
+SPEED_KEYS.concat(['r2delay', 'turnpause', 'r2dist', 'gap']).forEach(k => document.getElementById('spd_' + k)
   .addEventListener('input', e => { e.target.dataset.touched = '1'; }));
 
 function aim(robot, action, delta) {
@@ -2262,7 +3106,7 @@ const ROUTE_2F = [[64.1,60.8],[54.6,60.8],[54.6,89.6]];   // ROUTE_2F_M 구간�
 const ROUTE_1F = [[67.5,45.0],[56.1,45.0],[56.1,18.5]];
 const ROUTE_2F_LEN_M = """ + json.dumps([m for _, m in ROUTE_2F_M]) + r""";
 const ROUTE_1F_LEN_M = """ + json.dumps([m for _, m in ROUTE_1F_M]) + r""";
-const FOLLOW_GAP_M = """ + str(FOLLOW_GAP_M) + r""";
+let FOLLOW_GAP_M = """ + str(FOLLOW_GAP_M) + r""";
 // 경로 출발점에서 m미터 지점의 도면 좌표 — 구간(꺾임점) 단위로 도면 실측 거리를 따라감
 function pointAtMeters(route, lens, m) {
   m = Math.max(0, m);
@@ -2277,11 +3121,19 @@ function pointAtMeters(route, lens, m) {
 }
 let modeFactor = 1;
 // offsetM: 이 로봇이 경로 출발점에서 몇 m 앞에서 출발하는지 (R1 = 4m, R2·R3 = 0)
+let testRunning = false;
 function placeRobot(id, s, route, lens, path, offsetM, timeScale) {
   const el = document.getElementById(id);
   let m = offsetM, glide = 1.4, cls = 'idle', word = '대기';
   if (!s.connected && !simMode && !s.moving) { cls = ''; word = '미연결'; }
-  if (s.moving) {
+  if (s.moving && s.progress_m != null) {
+    m = s.progress_m; glide = 0.3; cls = 'moving'; word = '따라가기';
+    if (id === 'robotR1') word = '주행';
+  } else if (testRunning && s.moving) {
+    cls = 'moving'; word = '테스트';
+  } else if (s.returning) {
+    glide = s.return_secs || 1.4; cls = 'moving'; word = '복귀';
+  } else if (s.moving) {
     const k = s.step || 0;
     m = offsetM + path.slice(0, k).reduce((a, p) => a + (p.meters || 0), 0);   // 현재 구간 끝 지점
     const cur = path[k - 1];
@@ -2308,7 +3160,8 @@ function updateFloorplan(d) {
   modeFactor = (TARGET_MODES[d.target] || {}).mps || 1;
   const sp = d.speeds || DEFAULT_SPEEDS;
   placeRobot('robotR1', d.floor2, ROUTE_2F, ROUTE_2F_LEN_M, PATH_2F, FOLLOW_GAP_M, SPEED_REF / sp.floor2);
-  placeRobot('robotR2', d.rear,   ROUTE_2F, ROUTE_2F_LEN_M, PATH_R2, 0, SPEED_REF / sp.floor2 * (d.r2_dist_pct || 100) / 100);
+  // 따라가기 중 R1 진행 거리는 R2 출발점 기준 — offset 없이 그대로
+  placeRobot('robotR2', d.rear,   ROUTE_2F, ROUTE_2F_LEN_M, PATH_R2, 0, SPEED_REF / sp.rear * (d.r2_dist_pct || 100) / 100);
   placeRobot('robotR3', d.floor1, ROUTE_1F, ROUTE_1F_LEN_M, PATH_1F, 0, SPEED_REF / sp.floor1);
   if (followFallen) {
     const r2 = document.getElementById('robotR2');
@@ -2396,6 +3249,9 @@ function update() {
   fetch('/api/status')
     .then(r => r.json())
     .then(d => {
+      if (d.paths) { PATH_2F = d.paths.floor2; PATH_R2 = d.paths.rear; }
+      if (d.follow_gap != null) FOLLOW_GAP_M = d.follow_gap;
+      testRunning = !!d.test_running;
       // sim badge
       if (d.sim_mode) document.getElementById('simBadge').style.display = 'inline-block';
 
@@ -2462,7 +3318,8 @@ function update() {
       document.getElementById('dotR2').className   = 'dot' + (r2.connected ? ' on' : '');
       document.getElementById('connR2').textContent = r2.connected ? '연결됨' : '연결 안됨';
       document.getElementById('batR2Txt').textContent = `배터리 ${r2.battery}%`;
-      renderSteps('pathStepsR2', PATH_R2, r2.step || 0, ts2 * (d.r2_dist_pct || 100) / 100);
+      const tsR2 = SPEED_REF / (d.speeds ? d.speeds.rear : SPEED_REF) * (d.r2_dist_pct || 100) / 100;
+      renderSteps('pathStepsR2', PATH_R2, r2.step || 0, tsR2);
       document.getElementById('pathLabelR2').textContent = r2.moving
         ? `R1 경로 추종 중: ${r2.step} / ${r2.total_steps}`
         : ((r2.step || 0) === 0 ? '대기 중' : '완료');
