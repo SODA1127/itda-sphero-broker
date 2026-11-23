@@ -14,6 +14,7 @@ ISE103 재난 대피 안내 로봇 — Sphero BOLT PoC 브로커
 
 import argparse
 import os
+import tempfile
 import threading
 import time
 import json
@@ -32,6 +33,13 @@ ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
 _vision_busy  = threading.Lock()   # Vision 호출 중복 방지
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
+try:    # 재시작해도 남는 로그 — 문제 진단용
+    _fh = logging.FileHandler(os.path.join(tempfile.gettempdir(), "bandi_broker.log"), encoding="utf-8")
+    _fh.setFormatter(logging.Formatter('%(asctime)s %(message)s'))
+    _fh.addFilter(lambda r: r.name != "werkzeug")     # HTTP 요청 줄은 빼고
+    logging.getLogger().addHandler(_fh)
+except OSError:
+    pass
 
 # ── 설정 ───────────────────────────────────────────────────────────────────────
 SPHERO_2F_NAME  = "SB-25D4"   # 2층 Sphero BLE 이름 (R1 선두)
@@ -542,6 +550,7 @@ NAV_STOP_CM        = 4.0    # 목표까지 이만큼 남으면 정지 — 굴러
 NAV_SLOW_CM        = 30.0   # 이 거리 안에서 감속
 NAV_MIN_SPEED      = 50     # 감속 하한 속도 값 — 이보다 낮으면 Sphero가 거의 안 움직임 (설정 속도가 더 낮으면 그 값)
 NAV_MAX_STEER_DEG  = 25     # 구간 방향에서 벗어나 보정할 수 있는 최대 각
+LOC_ROT_SNAP_DEG   = 15.0   # 좌표축 보정이 이보다 작으면 0° — 트롤리에 끌린 출발 흔들림을 보정값으로 오인하지 않게
 NAV_CALIB_CM       = 15.0   # 첫 구간에서 위치 좌표축 회전을 추정할 최소 이동 거리
 NAV_TIMEOUT_FACTOR = 3.0    # 예상 시간 × 이 값 + 3초가 지나도 도착 못 하면 다음 구간으로
 NAV_HOME_TOL_CM    = 8.0    # 복귀 때 이 안이면 도착으로 봄
@@ -551,7 +560,10 @@ _loc      = {k: None for k in _ROBOT_KEYS}                     # 원시 위치 (
 _loc_rot  = {k: None for k in _ROBOT_KEYS}                     # 위치 좌표축 → 헤딩 좌표 회전(도), 첫 구간에서 추정
 _sim_pose = {k: [0.0, 0.0, 0, 0, time.time()] for k in _ROBOT_KEYS}  # SIM: x, y, 헤딩, 속도, 시각
 _wpts     = {k: [] for k in _ROBOT_KEYS}                       # 실제로 지난 지점 (헤딩 좌표 cm), [0] = 출발점
-_uturn_learned = {"shift_cm": None}                            # R2 U턴이 실제로 옆으로 옮긴 거리 (측정값)
+# R2 U턴이 실제로 옮겨 놓는 거리 — side: U턴 방향 옆으로, along: 다가온 방향으로 (앞으로 밀리면 음수)
+# 복귀할 때마다 실측해 반씩 섞고 설정 파일에 저장 (재시작해도 유지)
+_uturn_learned = {"side": _load_setting("uturn_side", 35.0, 0, 200),
+                  "along": _load_setting("uturn_along", -25.0, -150, 150)}
 
 def _bolt_of(key):
     return {"floor2": _bolt_2f, "rear": _bolt_r2, "floor1": _bolt_1f}[key]
@@ -564,6 +576,10 @@ def _vec(h):
 
 def _angle_of(dx, dy):
     return math.degrees(math.atan2(dx, dy)) % 360
+
+def _snap_rot(rot):
+    """위치 좌표축은 원래 헤딩과 같음 — 작은 차이는 측정 흔들림으로 보고 0°"""
+    return 0.0 if abs(rot) < LOC_ROT_SNAP_DEG else rot
 
 def _norm180(a):
     return ((a + 180) % 360) - 180
@@ -665,6 +681,7 @@ def _nav_to(key, bolt, ctx, target_of, heading, speed, cancelled, calib=True, ho
                 dx, dy = raw[0] - calib_from[0], raw[1] - calib_from[1]
                 if math.hypot(dx, dy) >= NAV_CALIB_CM:
                     rot = _norm180(_angle_of(dx, dy) - heading)
+                    rot = _snap_rot(rot)
                     _loc_rot[key] = rot
                     log_event(f"  📐 {_AIM_LABEL[key]} 위치 좌표축 보정 {rot:+.0f}°")
                     if ctx.get("start") is None and ctx.get("raw0") is not None:
@@ -857,16 +874,16 @@ def _return_home_nav(key, gen):
     if key == "rear":
         last_from = path_pts[-2] if len(path_pts) >= 2 else p
         back = _angle_of(home[0] - last_from[0], home[1] - last_from[1])
-        shift = _uturn_learned["shift_cm"] or 2 * _mps(key, R2_UTURN_SPEED) * R2_UTURN_SEC / math.pi * 100 * R2_UTURN_COMP
+        shift, along = _uturn_learned["side"], _uturn_learned["along"]
+        bx, by = _vec(back)
         best = None
         for sign in (-1, +1):
             dvx, dvy = _vec(back + 90 * sign)
-            pre = (home[0] - dvx * shift, home[1] - dvy * shift)
+            pre = (home[0] - dvx * shift - bx * along, home[1] - dvy * shift - by * along)
             score = math.hypot(pre[0] - last_from[0], pre[1] - last_from[1])
             if best is None or score < best[0]:
                 best = (score, sign, pre)
         uturn = (best[1], best[2], shift, back)
-        bx, by = _vec(back)
         lead_in = (best[2][0] - bx * 30, best[2][1] - by * 30)     # U턴 지점 30cm 앞
         path_pts[-1:] = [lead_in, best[2]]
     with _state_lock:
@@ -876,7 +893,7 @@ def _return_home_nav(key, gen):
             / max(_mps(key, speed), 0.05) + 0.5 * len(path_pts) + (R2_UTURN_SEC if uturn else 1), 1)
     _set_led(bolt, 255, 255, 255)
     log_event(f"↩ {label} 출발 좌표로 복귀 (위치 기반, 지점 {len(path_pts)}개"
-              + (f", U턴 {'오른쪽' if uturn[0] > 0 else '왼쪽'} {uturn[2]:.0f}cm 옆걸음 보정" if uturn else "") + ")")
+              + (f", U턴 {'오른쪽' if uturn[0] > 0 else '왼쪽'} 옆 {uturn[2]:.0f}cm·앞뒤 {-_uturn_learned['along']:+.0f}cm 보정" if uturn else "") + ")")
     try:
         cur_h = None
         for tgt in path_pts:
@@ -912,10 +929,18 @@ def _return_home_nav(key, gen):
             time.sleep(0.3)
             after = _pos(key, bolt)
             if before is not None and after is not None:
-                moved = math.hypot(after[0] - before[0], after[1] - before[1])
-                if 10 < moved < 200:
-                    _uturn_learned["shift_cm"] = round(moved, 1)
-                    log_event(f"  📏 R2 U턴 실제 옆걸음 {moved:.0f}cm — 다음 복귀에 반영")
+                # 계획한 U턴 지점 → U턴 뒤 위치: 멈춘 뒤 미끄러짐까지 포함한 실제 옮김
+                pre = uturn[1]
+                dx, dy = after[0] - pre[0], after[1] - pre[1]
+                dvx, dvy = _vec(start_h + 90 * sign)
+                bx, by = _vec(start_h)
+                side_m, along_m = dx * dvx + dy * dvy, dx * bx + dy * by
+                if 0 < side_m < 200 and abs(along_m) < 150:
+                    _uturn_learned["side"] = round((_uturn_learned["side"] + side_m) / 2, 1)
+                    _uturn_learned["along"] = round((_uturn_learned["along"] + along_m) / 2, 1)
+                    _save_settings()
+                    log_event(f"  📏 R2 U턴 실측 옆 {side_m:.0f}cm · 앞뒤 {-along_m:+.0f}cm"
+                              f" → 다음 보정 옆 {_uturn_learned['side']:.0f}cm · 앞뒤 {-_uturn_learned['along']:+.0f}cm")
         elif bolt is not None:
             bolt.drive_control.roll_start(0, 0)
             time.sleep(1.0)
@@ -1002,13 +1027,45 @@ def _calibrate_axes(key, bolt, heading, speed, cancelled):
             break
         dx, dy = raw[0] - raw0[0], raw[1] - raw0[1]
         if math.hypot(dx, dy) >= NAV_CALIB_CM:
-            _loc_rot[key] = _norm180(_angle_of(dx, dy) - heading)
+            _loc_rot[key] = _snap_rot(_norm180(_angle_of(dx, dy) - heading))
             log_event(f"  📐 {_AIM_LABEL[key]} 위치 좌표축 보정 {_loc_rot[key]:+.0f}°")
             return _unrot(raw0[0], raw0[1], _loc_rot[key])
         _drive(key, bolt, heading, speed)
         time.sleep(0.05)
     _halt(key, bolt, heading)
     return None
+
+FOLLOW_CORNER_DEG     = 50.0   # R1 발자국이 이만큼 꺾이면 모서리로 봄
+FOLLOW_CORNER_STOP_CM = 12.0   # 모서리 이만큼 앞에서 멈춤 — 멈춘 뒤 트롤리에 밀려 미끄러지는 거리만큼
+
+FOLLOW_TRACE = os.path.join(tempfile.gettempdir(), "bandi_follow_trace.csv")
+
+def _trace(line):
+    """R2 따라가기 진단 기록 — None이면 새로 시작"""
+    try:
+        with open(FOLLOW_TRACE, "w" if line is None else "a", encoding="utf-8") as f:
+            if line is not None:
+                f.write(line + "\n")
+    except OSError:
+        pass
+
+def _crumb_corner(crumbs, s_from, s_to):
+    """s_from~s_to 안에서 발자국이 가장 크게 꺾이는 지점 → (경로 거리, 꺾인 뒤 방향) 또는 None"""
+    end = crumbs[-1][2]
+    best, s = None, s_from
+    while s <= min(s_to, end - 15):
+        a = _crumb_point(crumbs, max(0.0, s - 15))
+        b = _crumb_point(crumbs, s)
+        c = _crumb_point(crumbs, s + 15)
+        if math.hypot(b[0] - a[0], b[1] - a[1]) > 5 and math.hypot(c[0] - b[0], c[1] - b[1]) > 5:
+            h_out = _angle_of(c[0] - b[0], c[1] - b[1])
+            turn = abs(_norm180(h_out - _angle_of(b[0] - a[0], b[1] - a[1])))
+            if turn >= FOLLOW_CORNER_DEG and (best is None or turn > best[0]):
+                best = (turn, s, h_out)
+            elif best is not None:
+                break                       # 모서리 지나감 — 가장 크게 꺾인 지점 확정
+        s += 3
+    return None if best is None else (best[1], best[2])
 
 def _run_r2_follow(gen):
     """R2가 R1 발자국을 간격만큼 뒤에서 따라감. R1이 끝나면 도착 간격까지 다가가 멈춤"""
@@ -1034,17 +1091,24 @@ def _run_r2_follow(gen):
     _set_led(bolt, 255, 180, 0)
     _set_matrix(bolt, 255, 180, 0, "^")
     log_event(f"  📍 {label} R1 좌표 따라가기 — 간격 {gap:g}cm, 도착 간격 {end_gap:g}cm")
+    _trace(None)
+    _trace("t,R1x,R1y,R1s,R2x,R2y,R2s,target_s,heading,moving,leader_done")
     r2_s, idx, moving, last_s, last_t, cur_h = 0.0, 0, False, 0.0, time.time(), 0
     ok, leader_seen, t_start = False, False, time.time()
-    while True:
-        if cancelled():
-            break
+    corner_done_s = -1e9            # 이미 멈춰 돈 모서리 (다시 잡지 않게)
+
+    def feed():
         lp = _common("floor2", _pos("floor2", _bolt_2f))
         if lp is not None and state["floor2"]["moving"]:
             lx, ly, ls = crumbs[-1]
             d = math.hypot(lp[0] - lx, lp[1] - ly)
             if d >= FOLLOW_CRUMB_CM:
                 crumbs.append((lp[0], lp[1], ls + d))
+
+    while True:
+        if cancelled():
+            break
+        feed()
         if state["floor2"]["moving"]:
             leader_seen = True
         # R1이 실제로 출발한 걸 본 뒤에 멈추면 '끝'. 3초 안에 출발 안 하면 R1 없이 끝난 것으로
@@ -1056,6 +1120,8 @@ def _run_r2_follow(gen):
             raise_exception("E4", f"{label} 위치 센서 끊김")
             break
         r2_s, idx = _crumb_project(crumbs, p, idx)
+        _trace(f"{time.time() - t_start:.2f},{crumbs[-1][0]:.0f},{crumbs[-1][1]:.0f},{crumbs[-1][2]:.0f},"
+               f"{p[0]:.0f},{p[1]:.0f},{r2_s:.0f},{target_s:.0f},{cur_h},{int(moving)},{int(leader_done)}")
         with _state_lock:
             state[key]["progress_m"] = round(r2_s / 100, 2)
             state["floor2"]["progress_m"] = round(crumbs[-1][2] / 100, 2)
@@ -1076,6 +1142,37 @@ def _run_r2_follow(gen):
         if leader_done and time.time() - last_t > FOLLOW_STALL_SEC:
             log_event(f"⚠ {label} 진척 없음 — 따라가기 종료 (남은 {remaining:.0f}cm)")
             break
+        # 모서리: R1처럼 앞에서 감속 → 멈춤 → 제자리에서 돌고 출발 (트롤리 관성으로 지나치지 않게)
+        corner = _crumb_corner(crumbs, max(r2_s, corner_done_s + 20), r2_s + 40)
+        if corner is not None and corner[0] > target_s:
+            corner = None                       # 목표 지점 너머 모서리 — 지금은 상관없음
+        if corner is not None:
+            cs, new_h = corner
+            to_c = cs - r2_s
+            if to_c <= FOLLOW_CORNER_STOP_CM:
+                _halt(key, bolt, cur_h)
+                moving = False
+                log_event(f"  ↪ {label} 모서리 앞 정지 → {new_h:.0f}° 방향으로 회전")
+                t_end = time.time() + state["turn_pause"]
+                while time.time() < t_end and not cancelled():
+                    feed()
+                    time.sleep(0.05)
+                cur_h = round(new_h) % 360
+                _drive(key, bolt, cur_h, 0)          # 제자리 회전
+                t_end = time.time() + 0.6
+                while time.time() < t_end and not cancelled():
+                    feed()
+                    time.sleep(0.05)
+                corner_done_s = cs
+                last_t = time.time()
+                continue
+            cx, cy = _crumb_point(crumbs, cs)
+            cur_h = round(_angle_of(cx - p[0], cy - p[1]))
+            spd = max(min(NAV_MIN_SPEED, speed), min(speed, int(speed * to_c / NAV_SLOW_CM)))
+            _drive(key, bolt, cur_h, spd)
+            moving = True
+            time.sleep(0.05)
+            continue
         tx, ty = _crumb_point(crumbs, min(r2_s + FOLLOW_LOOKAHEAD_CM, target_s))
         cur_h = round(_angle_of(tx - p[0], ty - p[1]))
         spd = speed if remaining > NAV_SLOW_CM else max(min(NAV_MIN_SPEED, speed), int(speed * remaining / NAV_SLOW_CM))
@@ -1526,7 +1623,7 @@ def api_trigger():
     trigger_signal("대시보드-수동")
     return jsonify({"ok": True})
 
-TEST_ROUTE_M = [(0, 1.0), (270, 1.0)]   # 테스트: R1 기준 직진 1m → 좌회전 1m (ㄱ자). R2는 간격만큼 뒤에서 같은 경로
+TEST_ROUTE_M = [(0, 1.0), (270, 1.5)]   # 테스트: R1 기준 직진 1m → 좌회전 1.5m (ㄱ자). R2는 간격만큼 뒤에서 같은 경로
 _test_running = {"on": False}
 
 def _test_paths(gap):
@@ -1551,7 +1648,7 @@ def _run_test_path(key, gen, path):
 
 @app.route("/api/test_route", methods=["POST"])
 def api_test_route():
-    """테스트 경로 — 연결된 로봇마다 제자리에서 직진 1m → 좌회전 1m. 상황 해제로 출발점 복귀"""
+    """테스트 경로 — 연결된 로봇마다 제자리에서 직진 1m → 좌회전 1.5m. 상황 해제로 출발점 복귀"""
     global _run_gen
     keys = [k for k in ("floor2", "rear", "floor1") if _active(k)]
     if not keys:
@@ -1893,7 +1990,8 @@ def _save_settings():
     with _state_lock:
         data = {**state["speeds"], "r2_delay": state["r2_delay"],
                 "turn_pause": state["turn_pause"], "aim_trim": state["aim_trim"],
-                "r2_dist_pct": state["r2_dist_pct"], "follow_gap": state["follow_gap"]}
+                "r2_dist_pct": state["r2_dist_pct"], "follow_gap": state["follow_gap"],
+                "uturn_side": _uturn_learned["side"], "uturn_along": _uturn_learned["along"]}
     try:
         with open(SPEED_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f)
@@ -2525,7 +2623,7 @@ kbd { background: var(--panel2); border: 1px solid var(--bdr); border-radius: 4p
         <button class="dz quake" id="dzquake" onclick="sendDisaster('quake')"><span class="ico">🌍</span>지진<small>가속도계 감지</small></button>
         <button class="dz black" id="dzblack" onclick="sendDisaster('black')"><span class="ico">💡</span>정전<small>조도 센서 감지</small></button>
         <button class="dz dz-clear" onclick="sendDisaster('clear')">상황 해제 · 평시 복귀</button>
-        <button class="dz dz-clear dz-test" onclick="testRoute()">🧪 테스트 경로 — ㄱ자 (직진 1m → 좌회전 1m)</button>
+        <button class="dz dz-clear dz-test" onclick="testRoute()">🧪 테스트 경로 — ㄱ자 (직진 1m → 좌회전 1.5m)</button>
       </div>
       <div class="note" id="triggerNote"></div>
     </div>
@@ -2840,7 +2938,7 @@ function testRoute() {
     .then(j => {
       const note = document.getElementById('triggerNote');
       note.innerHTML = j.ok
-        ? `<b>🧪 테스트 경로</b> — ${j.robots} R1 직진 1m → 좌회전 1m, R2는 간격만큼 뒤에서 R1이 꺾은 곳에서 꺾음 (이벤트 로그에 구간 표시). 끝나면 '상황 해제'로 출발점 복귀`
+        ? `<b>🧪 테스트 경로</b> — ${j.robots} R1 직진 1m → 좌회전 1.5m, R2는 간격만큼 뒤에서 R1이 꺾은 곳에서 꺾음 (이벤트 로그에 구간 표시). 끝나면 '상황 해제'로 출발점 복귀`
         : '⚠ ' + j.error;
       update();
     })
