@@ -601,7 +601,7 @@ def _make_loc_listener(key):
 def _sim_advance(key):
     p = _sim_pose[key]
     now = time.time()
-    if p[3] > 0:
+    if p[3] != 0:                       # 음수 = 후진
         v = _mps(key, p[3]) * 100
         dx, dy = _vec(p[2])
         p[0] += dx * v * (now - p[4])
@@ -614,6 +614,15 @@ def _drive(key, bolt, heading, speed):
         _sim_pose[key][2], _sim_pose[key][3] = heading % 360, speed
     if bolt is not None:
         bolt.drive_control.roll_start(int(heading) % 360, int(speed))
+
+def _drive_reverse(key, bolt, heading, speed):
+    """앞을 heading으로 둔 채 뒤로 — spherov2 roll_start(음수)는 180°를 더해 돌아선 뒤 원래 앞쪽으로 가 버림"""
+    if not _is_real(bolt):
+        _sim_advance(key)
+        _sim_pose[key][2], _sim_pose[key][3] = heading % 360, -speed
+    if _is_real(bolt):
+        from spherov2.commands.drive import DriveFlags
+        bolt.drive_with_heading(int(speed), int(heading) % 360, DriveFlags.BACKWARD)
 
 def _halt(key, bolt, heading):
     if not _is_real(bolt):
@@ -1850,14 +1859,16 @@ def api_manual_drive():
         _manual_last["ts"] = time.time()
         if cmd in ("a", "d"):
             m["heading"] = int(m["heading"] + (MANUAL_TURN_DEG if cmd == "d" else -MANUAL_TURN_DEG)) % 360
-            spd = MANUAL_SPEED if m["cmd"] == "w" else -MANUAL_SPEED if m["cmd"] == "s" else 0
-            _drive("rear", _bolt_r2, m["heading"], spd)        # 달리는 중이면 방향만, 서 있으면 제자리 회전
+            if m["cmd"] == "s":
+                _drive_reverse("rear", _bolt_r2, m["heading"], MANUAL_SPEED)   # 후진 중이면 앞 방향만 바꿈
+            else:                                              # 전진 중이면 방향만, 서 있으면 제자리 회전
+                _drive("rear", _bolt_r2, m["heading"], MANUAL_SPEED if m["cmd"] == "w" else 0)
         elif cmd == "w":
             m["cmd"] = "w"
             _drive("rear", _bolt_r2, m["heading"], MANUAL_SPEED)
         elif cmd == "s":
             m["cmd"] = "s"
-            _drive("rear", _bolt_r2, m["heading"], -MANUAL_SPEED)   # 방향 그대로 뒤로
+            _drive_reverse("rear", _bolt_r2, m["heading"], MANUAL_SPEED)   # 방향 그대로 뒤로
         else:
             m["cmd"] = None
             _halt("rear", _bolt_r2, m["heading"])
@@ -3122,7 +3133,7 @@ kbd { background: var(--panel2); border: 1px solid var(--bdr); border-radius: 4p
       <div class="manual-reason" id="manualReason">수동 조작 중</div>
       <div class="manual-grid">
         <div>
-          <div class="sub-label" style="margin:0 0 6px;">주행 — 키보드 WASD · 누르는 동안 이동</div>
+          <div class="sub-label" style="margin:0 0 6px;">주행 — 키보드 WASD 또는 방향키 · 누르는 동안 이동</div>
           <div class="wasd">
             <span></span><button class="key" data-cmd="w">W<small>전진</small></button><span></span>
             <button class="key" data-cmd="a">A<small>좌 15°</small></button>
@@ -3287,12 +3298,16 @@ document.querySelectorAll('.key[data-cmd]').forEach(b => {
   b.addEventListener('pointerdown', e => { e.preventDefault(); b.setPointerCapture(e.pointerId); keyDown(cmd); });
   ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(t => b.addEventListener(t, () => keyUp(cmd)));
 });
+// 물리 키 위치(e.code)로 판단 — 한글 입력 상태(ㅈㅁㄴㅇ)에서도 동작. 방향키도 같은 동작
+const KEY_CMD = { KeyW: 'w', ArrowUp: 'w', KeyA: 'a', ArrowLeft: 'a',
+                  KeyS: 's', ArrowDown: 's', KeyD: 'd', ArrowRight: 'd' };
 document.addEventListener('keydown', e => {
-  if (!manualOn || ['INPUT', 'TEXTAREA'].includes(e.target.tagName) || e.metaKey || e.ctrlKey || e.altKey) return;
-  const cmd = e.key.toLowerCase();
-  if ('wasd'.includes(cmd) && cmd.length === 1) { e.preventDefault(); if (!e.repeat) keyDown(cmd); }
+  const cmd = KEY_CMD[e.code];
+  if (!cmd || !manualOn || ['INPUT', 'TEXTAREA'].includes(e.target.tagName) || e.metaKey || e.ctrlKey || e.altKey) return;
+  e.preventDefault();                 // 방향키 페이지 스크롤 막음
+  if (!e.repeat) keyDown(cmd);
 });
-document.addEventListener('keyup', e => { const cmd = e.key.toLowerCase(); if ('wasd'.includes(cmd) && cmd.length === 1) keyUp(cmd); });
+document.addEventListener('keyup', e => { const cmd = KEY_CMD[e.code]; if (cmd) keyUp(cmd); });
 window.addEventListener('blur', stopAllKeys);
 function testRoute() {
   fetch('/api/test_route', { method: 'POST' })
