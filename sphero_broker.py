@@ -181,7 +181,7 @@ DISASTERS = {
 }
 EXCEPTIONS = {
     "E1": "센서 오인식 — 3초 미만 조도 하강 무시",
-    "E2": "경로 이탈 — IR 2초 끊기면 전 로봇 일시정지",
+    "E2": "경로 이탈 — IR 2초 끊김·경로 벗어남이면 R2 수동 조작(원격) 전환",
     "E3": "장애물 충돌 — 0.3m 후진 후 회피 재시도",
     "E4": "통신 단절 — 저장 경로로 계속 유도",
     "E5": "로봇 고장 — 예비 로봇이 역할 넘겨받아 투입",
@@ -203,6 +203,8 @@ state = {
     "disaster": None,           # fire / quake / black
     "target": "normal",
     "exceptions": {},           # "E4": "triggered" | "resolved"
+    "manual": {"on": False, "reason": "", "heading": 0, "cmd": None, "since": 0.0},   # R2 수동 조작(원격)
+    "ir": "off",                # R2가 R1 IR 보는지: off | wait | ok | lost
     "latency": None,            # 트리거 → 선두 출발 (초)
     "log": [],
     "sim_mode": False,
@@ -1067,10 +1069,114 @@ def _crumb_corner(crumbs, s_from, s_to):
         s += 3
     return None if best is None else (best[1], best[2])
 
+# ── R2 경로 이탈 폴백: IR 끊김 감지 → 수동 조작(원격) ─────────────────────────
+# R1이 IR을 송출하고 R2가 수신기로 읽는다. 따라가다 IR_LOST_SEC 동안 R1이 안 잡히거나
+# R2가 R1 발자국에서 OFFPATH_CM 넘게 벗어나면 자동 주행을 멈추고 대시보드 수동 조작으로 넘긴다.
+IR_FAR_CH, IR_NEAR_CH = 1, 0   # R1 IR 송출 채널 (원거리 1~3m / 근거리 1m 미만)
+IR_POLL_SEC    = 0.3           # R2 IR 수신기 확인 주기
+IR_LOST_SEC    = 2.0           # 이만큼 R1 IR이 안 잡히면 끊김
+IR_ARM_SEC     = 5.0           # 따라가기 시작 후 이 안에 한 번도 안 잡히면 IR 감지 끔 (센서 미지원·거리 초과)
+OFFPATH_CM     = 40.0          # R1 발자국에서 이만큼 벗어나면 경로 이탈
+OFFPATH_SEC    = 1.0           # 이탈이 이만큼 이어지면 전환
+MANUAL_SPEED   = 70            # 수동 조작 주행 속도
+MANUAL_TURN_DEG = 15           # A/D 한 번에 도는 각도
+MANUAL_HOLD_SEC = 0.5          # W/S 신호가 이만큼 끊기면 정지 (버튼 뗌·통신 끊김 대비)
+TTS_MAX_AGE    = 15.0          # 폰이 이보다 오래된 TTS는 무시
+
+_manual_lock = threading.Lock()
+_manual_last = {"ts": 0.0}
+_tts = {"id": 0, "text": "", "ts": 0.0}
+
+def _ir_cmd(fn, bolt, *args):
+    """BOLT IR 명령 — spherov2가 BOLT용 프로세서를 안 붙여 둬서 직접 지정"""
+    from spherov2.controls.v2 import Processors
+    return fn(bolt, *args, proc=Processors.SECONDARY)
+
+def _ir_begin():
+    """R1 IR 송출 시작 — 실제 R1·R2가 모두 있을 때만"""
+    if not (_is_real(_bolt_2f) and _is_real(_bolt_r2)):
+        return False
+    try:
+        from spherov2.commands.sensor import Sensor
+        _ir_cmd(Sensor.start_robot_to_robot_infrared_broadcasting, _bolt_2f, IR_FAR_CH, IR_NEAR_CH)
+        return True
+    except Exception as e:
+        log_event(f"  📡 R1 IR 송출 실패 — IR 끊김 감지 꺼짐 ({e})")
+        return False
+
+def _ir_end():
+    if _is_real(_bolt_2f):
+        try:
+            from spherov2.commands.sensor import Sensor
+            _ir_cmd(Sensor.stop_robot_to_robot_infrared_broadcasting, _bolt_2f)
+        except Exception:
+            pass
+
+def _ir_seen():
+    """R2 IR 수신기 중 하나라도 R1 신호를 보면 True, 읽기 실패면 None"""
+    try:
+        from spherov2.commands.sensor import Sensor
+        r = _ir_cmd(Sensor.get_bot_to_bot_infrared_readings, _bolt_r2)
+        return any(bool(v) for v in r)
+    except Exception:
+        return None
+
+def _set_ir(status):
+    with _state_lock:
+        state["ir"] = status
+
+def _queue_tts(text):
+    with _state_lock:
+        _tts["id"] += 1
+        _tts["text"] = text
+        _tts["ts"] = time.time()
+    log_event(f"🔊 R2 폰 음성 안내: {text}")
+
+def _enter_manual(reason, auto=False):
+    """R2 자동 주행을 멈추고 수동 조작으로 — 따라가기 루프는 manual.on을 보고 스스로 빠진다"""
+    with _state_lock:
+        if state["manual"]["on"]:
+            return False
+        state["manual"].update(on=True, reason=reason, cmd=None, since=time.time())
+    _halt("rear", _bolt_r2, state["manual"]["heading"])
+    _set_led(_bolt_r2, 255, 0, 255)
+    _set_matrix(_bolt_r2, 255, 0, 255, "?")
+    if auto:
+        raise_exception("E2", reason)
+        _queue_tts("안내 로봇과 연결이 끊겼습니다. 잠시 멈춰 주세요. 원격으로 안내합니다.")
+    log_event(f"🎮 R2 수동 조작 전환 — {reason}")
+    return True
+
+def _exit_manual():
+    with _state_lock:
+        if not state["manual"]["on"]:
+            return False
+        state["manual"].update(on=False, cmd=None, reason="")
+    _halt("rear", _bolt_r2, state["manual"]["heading"])
+    _set_led(_bolt_r2, 255, 180, 0)
+    _set_matrix(_bolt_r2, 255, 180, 0, "^")
+    log_event("🎮 R2 수동 조작 해제 — 다음 주행부터 자동")
+    return True
+
+def _manual_watchdog():
+    """W/S를 누르고 있는 동안만 달림 — 신호가 끊기면 세움"""
+    while True:
+        time.sleep(0.1)
+        m = state["manual"]
+        if m["on"] and m["cmd"] in ("w", "s") and time.time() - _manual_last["ts"] > MANUAL_HOLD_SEC:
+            with _manual_lock:
+                m["cmd"] = None
+                _halt("rear", _bolt_r2, m["heading"])
+
+threading.Thread(target=_manual_watchdog, daemon=True).start()
+
 def _run_r2_follow(gen):
     """R2가 R1 발자국을 간격만큼 뒤에서 따라감. R1이 끝나면 도착 간격까지 다가가 멈춤"""
     key, bolt, label = "rear", _bolt_r2, "R2"
-    cancelled = lambda: gen != _run_gen
+    cancelled = lambda: gen != _run_gen or state["manual"]["on"]
+    if state["manual"]["on"]:
+        log_event(f"  🎮 {label} 수동 조작 중 — 자동 따라가기 생략")
+        return False
     gap = state["follow_gap"] * 100
     end_gap = min(FOLLOW_END_GAP_M, state["follow_gap"]) * 100
     speed = min(255, int(state["speeds"][key] * TARGET_MODES[state["target"]]["mps"]))
@@ -1096,6 +1202,10 @@ def _run_r2_follow(gen):
     r2_s, idx, moving, last_s, last_t, cur_h = 0.0, 0, False, 0.0, time.time(), 0
     ok, leader_seen, t_start = False, False, time.time()
     corner_done_s = -1e9            # 이미 멈춰 돈 모서리 (다시 잡지 않게)
+    ir_on = _ir_begin()
+    ir_t0, ir_last, ir_poll = time.time(), None, 0.0
+    off_since = None
+    _set_ir("wait" if ir_on else "off")
 
     def feed():
         lp = _common("floor2", _pos("floor2", _bolt_2f))
@@ -1120,6 +1230,33 @@ def _run_r2_follow(gen):
             raise_exception("E4", f"{label} 위치 센서 끊김")
             break
         r2_s, idx = _crumb_project(crumbs, p, idx)
+        # 경로 이탈 1: R1 발자국에서 벗어남 (위치)
+        qx, qy = _crumb_point(crumbs, r2_s)
+        off = math.hypot(p[0] - qx, p[1] - qy)
+        if off > OFFPATH_CM:
+            off_since = off_since or time.time()
+            if time.time() - off_since > OFFPATH_SEC:
+                state["manual"]["heading"] = cur_h
+                _enter_manual(f"경로 이탈 {off:.0f}cm", auto=True)
+                break
+        else:
+            off_since = None
+        # 경로 이탈 2: R1 IR 끊김
+        if ir_on and time.time() - ir_poll >= IR_POLL_SEC:
+            ir_poll = time.time()
+            seen = _ir_seen()
+            if seen:
+                ir_last = ir_poll
+                _set_ir("ok")
+            if ir_last is None and ir_poll - ir_t0 > IR_ARM_SEC:
+                ir_on = False
+                _set_ir("off")
+                log_event(f"  📡 {label} IR로 R1이 한 번도 안 잡힘 — IR 감지 끄고 위치 이탈만 감시")
+            elif ir_last is not None and ir_poll - ir_last > IR_LOST_SEC:
+                _set_ir("lost")
+                state["manual"]["heading"] = cur_h
+                _enter_manual(f"IR {IR_LOST_SEC:g}초 끊김 — R1 인식 안 됨", auto=True)
+                break
         _trace(f"{time.time() - t_start:.2f},{crumbs[-1][0]:.0f},{crumbs[-1][1]:.0f},{crumbs[-1][2]:.0f},"
                f"{p[0]:.0f},{p[1]:.0f},{r2_s:.0f},{target_s:.0f},{cur_h},{int(moving)},{int(leader_done)}")
         with _state_lock:
@@ -1192,8 +1329,13 @@ def _run_r2_follow(gen):
     if ok:
         _set_led(bolt, 255, 0, 0)
         log_event(f"✅ {label} R1 뒤 {end_gap:g}cm 도착 (따라간 거리 {r2_s / 100:.2f}m)")
+    elif state["manual"]["on"]:
+        log_event(f"⏸ {label} 자동 따라가기 멈춤 — 수동 조작으로 넘김")
     elif cancelled():
         log_event(f"⏹ {label} 따라가기 중단 (상황 해제)")
+    _ir_end()
+    if state.get("ir") != "lost":
+        _set_ir("off")
     return ok
 
 def _run_r2_delayed(gen, delay, path):
@@ -1581,6 +1723,9 @@ def api_status():
             "r2_dist_pct":   state["r2_dist_pct"],
             "follow_gap":    state["follow_gap"],
             "test_running":  _test_running["on"],
+            "manual":        {k: state["manual"][k] for k in ("on", "reason", "heading", "cmd")},
+            "ir":            state.get("ir", "off"),
+            "tts":           {"id": _tts["id"], "text": _tts["text"]},
             "positions":     {k: (lambda p: {"x": round(p[0]), "y": round(p[1])} if p else None)(_pos(k, _bolt_of(k)))
                               for k in _ROBOT_KEYS},
             "paths":         dict(zip(("floor2", "rear"),
@@ -1673,6 +1818,85 @@ def api_test_route():
     for k in keys:
         threading.Thread(target=_run_test_path, args=(k, gen, paths[k]), daemon=True).start()
     return jsonify({"ok": True, "robots": names})
+
+@app.route("/api/manual", methods=["POST"])
+def api_manual():
+    """수동 조작 켜기/끄기 — {on: bool, reason?: str, sim?: bool(IR 끊김 흉내)}"""
+    data = flask_request.get_json(silent=True) or {}
+    if data.get("on"):
+        if not _active("rear"):
+            return jsonify({"ok": False, "error": "R2 연결 안 됨"}), 400
+        if data.get("sim"):
+            _set_ir("lost")
+            _enter_manual("IR 끊김 (테스트)", auto=True)
+        else:
+            _enter_manual(str(data.get("reason") or "대시보드에서 전환"))
+    else:
+        _exit_manual()
+        if state.get("ir") == "lost":
+            _set_ir("off")
+    return jsonify({"ok": True, "manual": state["manual"]["on"]})
+
+@app.route("/api/manual/drive", methods=["POST"])
+def api_manual_drive():
+    """WASD — w 전진 · s 후진 (누르는 동안 반복 전송) · a/d 15° 회전 · stop"""
+    cmd = ((flask_request.get_json(silent=True) or {}).get("cmd") or "").lower()
+    m = state["manual"]
+    if not m["on"]:
+        return jsonify({"ok": False, "error": "수동 조작 모드 아님"}), 409
+    if cmd not in ("w", "a", "s", "d", "stop"):
+        return jsonify({"ok": False, "error": "cmd는 w/a/s/d/stop"}), 400
+    with _manual_lock:
+        _manual_last["ts"] = time.time()
+        if cmd in ("a", "d"):
+            m["heading"] = int(m["heading"] + (MANUAL_TURN_DEG if cmd == "d" else -MANUAL_TURN_DEG)) % 360
+            spd = MANUAL_SPEED if m["cmd"] == "w" else -MANUAL_SPEED if m["cmd"] == "s" else 0
+            _drive("rear", _bolt_r2, m["heading"], spd)        # 달리는 중이면 방향만, 서 있으면 제자리 회전
+        elif cmd == "w":
+            m["cmd"] = "w"
+            _drive("rear", _bolt_r2, m["heading"], MANUAL_SPEED)
+        elif cmd == "s":
+            m["cmd"] = "s"
+            _drive("rear", _bolt_r2, m["heading"], -MANUAL_SPEED)   # 방향 그대로 뒤로
+        else:
+            m["cmd"] = None
+            _halt("rear", _bolt_r2, m["heading"])
+    return jsonify({"ok": True, "heading": m["heading"]})
+
+MANUAL_MATRIX = {
+    "up":    ("^", (0, 255, 0)),
+    "left":  ("<", (0, 255, 0)),
+    "right": (">", (0, 255, 0)),
+    "down":  ("v", (0, 255, 0)),
+    "stop":  ("X", (255, 0, 0)),
+    "warn":  ("!", (255, 180, 0)),
+    "help":  ("?", (255, 0, 255)),
+    "off":   ("",  (0, 0, 0)),
+}
+
+@app.route("/api/manual/matrix", methods=["POST"])
+def api_manual_matrix():
+    """R2 매트릭스 표시 — up/left/right/down/stop/warn/help/off"""
+    name = (flask_request.get_json(silent=True) or {}).get("pattern")
+    if name not in MANUAL_MATRIX:
+        return jsonify({"ok": False, "error": "알 수 없는 표시"}), 400
+    if not _active("rear"):
+        return jsonify({"ok": False, "error": "R2 연결 안 됨"}), 400
+    ch, (r, g, b) = MANUAL_MATRIX[name]
+    _set_matrix(_bolt_r2, r, g, b, ch)
+    log_event(f"  🎮 R2 매트릭스 '{ch or '끄기'}'")
+    return jsonify({"ok": True})
+
+@app.route("/api/manual/tts", methods=["POST"])
+def api_manual_tts():
+    """R2 폰 음성 안내 — 폰이 0.5초마다 방위 보낼 때 응답으로 받아 읽음"""
+    text = str((flask_request.get_json(silent=True) or {}).get("text") or "").strip()[:200]
+    if not text:
+        return jsonify({"ok": False, "error": "문구 없음"}), 400
+    _queue_tts(text)
+    phone = state.get("phone") or {}
+    online = bool(phone) and time.time() - phone.get("ts", 0) < PHONE_HEADING_MAX_AGE
+    return jsonify({"ok": True, "phone_online": online})
 
 @app.route("/api/disaster", methods=["POST"])
 def api_disaster():
@@ -2068,7 +2292,11 @@ def api_phone_heading():
     with _state_lock:
         state["phone"] = {"azimuth": round(az, 1), "quality": round(quality, 2),
                           "accuracy": acc if isinstance(acc, int) else None, "ts": time.time()}
-    return jsonify({"ok": True})
+        tts = dict(_tts)
+    resp = {"ok": True}
+    if tts["id"] and time.time() - tts["ts"] < TTS_MAX_AGE:
+        resp["tts"] = {"id": tts["id"], "text": tts["text"]}     # 폰이 새 id면 읽어 줌
+    return jsonify(resp)
 
 PHONE_HEADING_MAX_AGE = 5.0    # 초 — 이보다 오래된 폰 방위는 쓰지 않음
 PHONE_MIN_QUALITY     = 0.5    # 폰이 이보다 눕혀져 있으면 방위가 부정확
@@ -2435,6 +2663,34 @@ header h1 { font-size: 18px; font-weight: 700; }
 .follow-dir { font-size: 36px; font-weight: 800; line-height: 1; margin-top: 6px; }
 .follow-info { font-size: 12px; color: var(--dim); margin-top: 4px; }
 .btn-follow-on  { background: #166534; color: #86efac; border: 1px solid #22c55e; }
+.manual-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.btn-manual { background: #3b1d4a; color: #f0abfc; border: 1px solid #c026d3; }
+.btn-manual.on { background: #c026d3; color: #fff; }
+.btn-ghost { background: transparent; color: var(--dim); border: 1px dashed var(--bdr); }
+.ir-chip { font-size: 11px; padding: 2px 8px; border-radius: 99px; border: 1px solid var(--bdr); color: var(--dim); }
+.ir-chip.ok   { color: var(--grn); border-color: var(--grn); }
+.ir-chip.wait { color: var(--yel); border-color: var(--yel); }
+.ir-chip.lost { color: #fff; background: var(--red); border-color: var(--red); }
+.manual-panel { border: 1px solid #c026d3; border-radius: 10px; padding: 12px; margin-bottom: 14px;
+                background: rgba(192, 38, 211, .06); }
+.manual-reason { font-weight: 700; color: #f0abfc; margin-bottom: 10px; }
+.manual-grid { display: grid; grid-template-columns: auto 1fr; gap: 18px; align-items: start; }
+.wasd { display: grid; grid-template-columns: repeat(3, 52px); gap: 6px; }
+.key { height: 52px; border-radius: 8px; border: 1px solid var(--bdr); background: var(--bg); color: var(--txt);
+       font: 700 16px 'JetBrains Mono', monospace; cursor: pointer; display: flex; flex-direction: column;
+       align-items: center; justify-content: center; user-select: none; touch-action: none; }
+.key small { font: 400 10px system-ui, sans-serif; color: var(--dim); }
+.key.down { background: #c026d3; border-color: #c026d3; }
+.key.down small { color: #fff; }
+.mx-btns { display: grid; grid-template-columns: repeat(4, 40px); gap: 6px; }
+.mx { height: 40px; border-radius: 7px; border: 1px solid var(--bdr); background: #000; color: var(--dim);
+      font: 700 16px system-ui, sans-serif; cursor: pointer; }
+.mx.g { color: #4ade80; } .mx.r { color: #f87171; } .mx.y { color: #fbbf24; } .mx.m { color: #e879f9; }
+.mx:hover, .key:hover { border-color: #c026d3; }
+.tts-row { display: flex; gap: 8px; margin-top: 12px; }
+.tts-row input { flex: 1; min-width: 0; padding: 6px 10px; border-radius: 7px; border: 1px solid var(--bdr);
+                 background: var(--bg); color: var(--txt); font-size: 13px; }
+@media (max-width: 640px) { .manual-grid { grid-template-columns: 1fr; } }
 .btn-follow-off { background: #7f1d1d; color: #fca5a5; border: 1px solid #ef4444; }
 .preview-age { position: absolute; bottom: 4px; right: 6px; font-size: 10px;
   color: rgba(255,255,255,.6); background: rgba(0,0,0,.5); padding: 1px 5px; border-radius: 3px; }
@@ -2856,7 +3112,45 @@ kbd { background: var(--panel2); border: 1px solid var(--bdr); border-radius: 4p
       <span id="appUrlCopied" style="color:var(--grn); display:none;">복사됨</span>
     </div>
     <div class="path-steps" id="pathStepsR2"></div>
-    <div class="sub-label" id="pathLabelR2" style="margin:6px 0 14px;">대기 중</div>
+    <div class="sub-label" id="pathLabelR2" style="margin:6px 0 10px;">대기 중</div>
+    <div class="manual-row">
+      <button class="btn btn-manual" id="btnManual" onclick="toggleManual()">🎮 수동 조작</button>
+      <button class="btn btn-ghost" onclick="simIrLost()" title="따라가다 IR이 끊긴 상황을 흉내 내 수동 조작으로 넘김">📡 IR 끊김 테스트</button>
+      <span class="ir-chip" id="irChip" title="R2 IR 수신기로 R1 인식 여부 — 따라가는 동안만 확인">IR —</span>
+    </div>
+    <div class="manual-panel" id="manualPanel" hidden>
+      <div class="manual-reason" id="manualReason">수동 조작 중</div>
+      <div class="manual-grid">
+        <div>
+          <div class="sub-label" style="margin:0 0 6px;">주행 — 키보드 WASD · 누르는 동안 이동</div>
+          <div class="wasd">
+            <span></span><button class="key" data-cmd="w">W<small>전진</small></button><span></span>
+            <button class="key" data-cmd="a">A<small>좌 15°</small></button>
+            <button class="key" data-cmd="s">S<small>후진</small></button>
+            <button class="key" data-cmd="d">D<small>우 15°</small></button>
+          </div>
+          <div class="sub-label" id="manualHeading" style="margin-top:6px;">방향 0°</div>
+        </div>
+        <div>
+          <div class="sub-label" style="margin:0 0 6px;">R2 매트릭스</div>
+          <div class="mx-btns">
+            <button class="mx g" onclick="manualMatrix('up')" title="직진">↑</button>
+            <button class="mx g" onclick="manualMatrix('left')" title="왼쪽">←</button>
+            <button class="mx g" onclick="manualMatrix('right')" title="오른쪽">→</button>
+            <button class="mx g" onclick="manualMatrix('down')" title="뒤로">↓</button>
+            <button class="mx r" onclick="manualMatrix('stop')" title="멈춤">✕</button>
+            <button class="mx y" onclick="manualMatrix('warn')" title="주의">!</button>
+            <button class="mx m" onclick="manualMatrix('help')" title="도움 요청">?</button>
+            <button class="mx" onclick="manualMatrix('off')" title="끄기">끔</button>
+          </div>
+        </div>
+      </div>
+      <form class="tts-row" onsubmit="sendTts(event)">
+        <input id="ttsInput" type="text" maxlength="200" placeholder="폰에서 읽어 줄 안내 (예: 왼쪽 계단으로 내려가세요)" autocomplete="off">
+        <button class="btn btn-connect" type="submit">🔊 전송</button>
+      </form>
+      <div class="sub-label" id="ttsNote">스마트폰(R2)이 0.5초 안에 받아 음성으로 읽음</div>
+    </div>
     <div class="follow-inner">
       <div class="follow-preview-wrap" id="followPreviewWrap">
         <span class="fall-badge">⚠ 넘어짐</span>
@@ -2932,6 +3226,74 @@ function postJSON(url, body) {
     .then(() => update()).catch(console.error);
 }
 function sendDisaster(type) { postJSON('/api/disaster', { type }); }
+
+// ── R2 수동 조작 (경로 이탈 폴백) ──
+let manualOn = false;
+const IR_TEXT = { off: 'IR —', wait: 'IR 확인 중', ok: 'IR R1 인식', lost: 'IR 끊김' };
+function renderManual(d) {
+  const m = d.manual || {};
+  manualOn = !!m.on;
+  const btn = document.getElementById('btnManual');
+  btn.classList.toggle('on', manualOn);
+  btn.textContent = manualOn ? '🎮 수동 조작 끝내기' : '🎮 수동 조작';
+  document.getElementById('manualPanel').hidden = !manualOn;
+  document.getElementById('manualReason').textContent = '🎮 수동 조작 중 — ' + (m.reason || '대시보드에서 전환');
+  document.getElementById('manualHeading').textContent = `방향 ${m.heading ?? 0}°` + (m.cmd === 'w' ? ' · 전진 중' : m.cmd === 's' ? ' · 후진 중' : '');
+  const chip = document.getElementById('irChip');
+  chip.className = 'ir-chip ' + (d.ir || 'off');
+  chip.textContent = IR_TEXT[d.ir] || 'IR —';
+  if (!manualOn) stopAllKeys();
+}
+function manualPost(url, body) {
+  return fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    .then(r => r.json()).then(j => { if (!j.ok) alert(j.error); return j; }).catch(console.error);
+}
+function toggleManual() { manualPost('/api/manual', { on: !manualOn }).then(update); }
+function simIrLost()   { manualPost('/api/manual', { on: true, sim: true }).then(update); }
+function manualMatrix(pattern) { manualPost('/api/manual/matrix', { pattern }); }
+function sendTts(e) {
+  e.preventDefault();
+  const inp = document.getElementById('ttsInput');
+  const text = inp.value.trim();
+  if (!text) return;
+  manualPost('/api/manual/tts', { text }).then(j => {
+    if (!j || !j.ok) return;
+    document.getElementById('ttsNote').textContent = j.phone_online
+      ? `🔊 "${text}" — 폰으로 보냄` : `⚠ 폰 연결 안 됨 — "${text}"는 폰이 붙으면 15초 안에 읽음`;
+    inp.value = '';
+  });
+}
+// 누르는 동안 150ms마다 반복 — 서버는 0.5초 신호 없으면 세움
+const keyTimers = {};
+function keyDown(cmd) {
+  if (!manualOn || keyTimers[cmd]) return;
+  const send = () => fetch('/api/manual/drive', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                                  body: JSON.stringify({ cmd }) }).catch(() => {});
+  send();
+  keyTimers[cmd] = setInterval(send, cmd === 'a' || cmd === 'd' ? 250 : 150);
+  document.querySelector(`.key[data-cmd="${cmd}"]`)?.classList.add('down');
+}
+function keyUp(cmd) {
+  if (!keyTimers[cmd]) return;
+  clearInterval(keyTimers[cmd]);
+  delete keyTimers[cmd];
+  document.querySelector(`.key[data-cmd="${cmd}"]`)?.classList.remove('down');
+  if (cmd === 'w' || cmd === 's') fetch('/api/manual/drive', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                                             body: JSON.stringify({ cmd: 'stop' }) }).catch(() => {});
+}
+function stopAllKeys() { Object.keys(keyTimers).forEach(keyUp); }
+document.querySelectorAll('.key[data-cmd]').forEach(b => {
+  const cmd = b.dataset.cmd;
+  b.addEventListener('pointerdown', e => { e.preventDefault(); b.setPointerCapture(e.pointerId); keyDown(cmd); });
+  ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(t => b.addEventListener(t, () => keyUp(cmd)));
+});
+document.addEventListener('keydown', e => {
+  if (!manualOn || ['INPUT', 'TEXTAREA'].includes(e.target.tagName) || e.metaKey || e.ctrlKey || e.altKey) return;
+  const cmd = e.key.toLowerCase();
+  if ('wasd'.includes(cmd) && cmd.length === 1) { e.preventDefault(); if (!e.repeat) keyDown(cmd); }
+});
+document.addEventListener('keyup', e => { const cmd = e.key.toLowerCase(); if ('wasd'.includes(cmd) && cmd.length === 1) keyUp(cmd); });
+window.addEventListener('blur', stopAllKeys);
 function testRoute() {
   fetch('/api/test_route', { method: 'POST' })
     .then(r => r.json())
@@ -3350,6 +3712,7 @@ function update() {
       if (d.paths) { PATH_2F = d.paths.floor2; PATH_R2 = d.paths.rear; }
       if (d.follow_gap != null) FOLLOW_GAP_M = d.follow_gap;
       testRunning = !!d.test_running;
+      renderManual(d);
       // sim badge
       if (d.sim_mode) document.getElementById('simBadge').style.display = 'inline-block';
 

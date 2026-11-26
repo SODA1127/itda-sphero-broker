@@ -126,6 +126,16 @@ python3.9 sphero_broker.py --sim --port 5002
 재난 트리거 카드의 테스트 버튼 — R1 직진 1m → 좌회전 1.5m, R2는 같은 방식으로 R1을 따라감 (R3는 혼자 ㄱ자). 상황 해제로 출발점 복귀.
 ㄱ자 회전 검증은 간격을 50cm 정도로 짧게 (간격이 1m 이상이면 R2는 모서리 전에 멈춤).
 
+### 🎮 R2 경로 이탈 폴백 — 수동 조작(원격)
+
+R2가 따라가다 R1을 놓치면 자동 주행을 멈추고 대시보드 수동 조작으로 넘긴다 (예외 E2).
+
+- **IR 끊김** — R1이 IR을 송출하고 R2가 IR 수신기로 읽는다. 2초 동안 R1이 안 잡히면 전환. 따라가기 시작 후 5초 안에 한 번도 안 잡히면 IR 감지는 끄고 위치 감시만 (BOLT IR 거리 약 3m)
+- **경로 이탈** — R2가 R1 발자국에서 40cm 넘게 1초 이상 벗어나면 전환
+- 전환되면 R2 정지 · 매트릭스 보라색 `?` · 폰이 "안내 로봇과 연결이 끊겼습니다…" 음성 안내
+- **R2 카드 → 🎮 수동 조작** 패널: WASD(키보드·버튼, 누르는 동안 이동, 0.5초 신호 끊기면 정지) · 매트릭스 표시(↑ ← → ↓ ✕ ! ? 끔) · 폰 음성 안내 입력
+- **📡 IR 끊김 테스트** 버튼으로 실제 끊김 없이 시연
+
 ### 주행 설정 (대시보드 "주행 속도" 카드 · `speed_settings.json`에 저장)
 
 | 항목 | 기본값 | 설명 |
@@ -165,4 +175,8 @@ python3.9 sphero_broker.py --sim --port 5002
 | `POST` | `/api/aim` | `{"robot", "action": "start"\|"rotate"\|"set"\|"clear_trim", "delta"}` 수동 방향 보정 |
 | `POST` | `/api/aim/auto` | 나침반 자동 에임 (연결된 로봇 전부) |
 | `POST` | `/api/phone/heading` | 앱의 셀피 정면 방위 수신 |
-| `POST` | `/api/test_route` | 테스트 경로 (ㄱ자 1m·1m) |
+| `POST` | `/api/test_route` | 테스트 경로 (ㄱ자 1m·1.5m) |
+| `POST` | `/api/manual` | `{"on": bool, "sim"?: bool}` R2 수동 조작 켜기·끄기 (sim = IR 끊김 테스트) |
+| `POST` | `/api/manual/drive` | `{"cmd": "w"\|"a"\|"s"\|"d"\|"stop"}` R2 수동 주행 |
+| `POST` | `/api/manual/matrix` | `{"pattern": "up"\|"left"\|"right"\|"down"\|"stop"\|"warn"\|"help"\|"off"}` R2 매트릭스 |
+| `POST` | `/api/manual/tts` | `{"text"}` R2 폰 음성 안내 (폰은 `/api/phone/heading` 응답으로 받음) |
