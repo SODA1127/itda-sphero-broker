@@ -1,0 +1,183 @@
+"""설정 — 로봇 이름·포트·대피 경로·주행 기본값·안내 대상 모드·재난·예외 정의, 설정 파일 읽기"""
+
+import json
+import os
+
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # 저장소 루트
+
+SPHERO_2F_NAME  = "SB-25D4"   # 2층 Sphero BLE 이름 (R1 선두)
+
+SPHERO_1F_NAME  = "SB-D721"   # 1층 Sphero BLE 이름 (R3 대기)
+
+SPHERO_R2_NAME  = "SB-3601"   # 2층 후방 Sphero BLE 이름 (R2, 스마트폰 트롤리)
+
+FLASK_PORT      = 5001
+
+FLOORPLAN_PDF   = os.path.join(ROOT, "팔달관_도면.pdf")
+
+SHAKE_THRESHOLD = 2.5          # G  — 이 이상이면 흔들기 신호로 판정
+
+SIGNAL_COOLDOWN = 10           # 초  — 한 번 신호 후 재차단 시간
+
+# 구간 = (헤딩, 거리 m). 헤딩 0° = R2 스마트폰 셀피 카메라 정면 = 경로 첫 구간 방향.
+# 90 = 우회전, 270 = 좌회전. 출발 전 대시보드 "방향 보정"으로 각 로봇 정면을 셀피 정면에 맞춰 0°로 저장.
+# 속도 기본값 (0~255) — 대시보드 "주행 속도"에서 바꾸면 speed_settings.json에 저장돼 재시작 후에도 유지
+DEFAULT_SPEEDS = {
+    "floor2": 100,     # R1 (2층 선두)
+    "rear":   150,     # R2 (2층 후방) — 스마트폰을 실어 무거우므로 더 세게. 실제 속도가 R1과 같아야 간격 유지
+    "floor1": 100,     # R3 (1층)
+}
+
+DEFAULT_TURN_PAUSE_SEC = 1.0 # 꺾기 전 정지 시간 — 멈춘 동안 매트릭스에 꺾는 방향 화살표 (0~10초)
+
+DEFAULT_R2_DIST_PCT = 100     # R2 거리 보정(%) — 폰 무게로 덜 가면 올림. 구간 시간에 곱해 같은 비율로 더 감 (50~200)
+
+DEFAULT_R2_DELAY_SEC = 0.0   # R2(후방) 출발 지연 — 0이면 R1과 동시 출발해 R1이 지나간 경로를 4m 뒤에서 따라감 (0~30초)
+
+SPEED_REF      = 100   # DRIVE_MPS를 잰 기준 속도 값
+
+DRIVE_MPS      = 0.8   # R1이 SPEED_REF로 1초에 가는 거리(m) — 현장 바닥에서 실측 후 수정
+
+FOLLOW_GAP_M   = 4.0   # R1(전방)–R2(후방) 간격 기본값 — 대시보드에서 바꿈. R2는 경로 출발점, R1은 이만큼 앞에서 출발
+
+FOLLOW_END_GAP_M = 1.0 # 도착 때 R2가 R1 뒤에 남기는 간격 — R2는 출발 4m 차이를 따라잡아 R1 바로 뒤까지 간다
+
+# 2층 (현재 시연용): 중앙 복도 모서리(보이드 아래) 출발 → 직진 → 좌회전 → 계단(EXIT). 모든 재난 유형 공통
+# 도면 전체 경로로 되돌릴 때: (0,0.9) (270,5.7) (0,5.7) (270,9.0) + 대시보드 ROUTE_2F 꺾임점 5개
+ROUTE_2F_M = [
+    (0,   5.7),        # ③ 19칸 — 직진 (중앙 복도)
+    (270, 9.0),        # ④ 30칸 — 좌회전, 계단 앞 핸드오프
+]
+
+ROUTE_1F_M = [         # 1층: 137호 옆 계단(출발) → 로비 → 주출입구(EXIT)
+    (0,   7.5),        # ① 25칸
+    (90,  7.5),        # ② 25칸 — 우회전
+]
+
+_ARROW = {0: "^", 90: ">", 180: "v", 270: "<"}
+
+def _slice_route(route, start_m, end_m):
+    """경로 중 start_m ~ end_m 구간만 (헤딩, m) 목록으로 잘라 낸다 (꺾이는 지점은 그대로)"""
+    out, pos = [], 0.0
+    for h, m in route:
+        a, b = max(pos, start_m), min(pos + m, end_m)
+        if b - a > 1e-6:
+            out.append((h, round(b - a, 2)))
+        pos += m
+    return out
+
+def _route_to_path(route, end_char, speed):
+    """(헤딩, m) 구간 → (속도, 헤딩, 지속 초, 매트릭스 문자) 주행 단계. 시간은 R1 기준 속도로 환산"""
+    path = [(speed, h, round(m / DRIVE_MPS, 2), _ARROW.get(h % 360, "^")) for h, m in route]
+    return path + [(0, route[-1][0], 0.0, end_char)]
+
+def _path_meters(path):
+    return [round(dur * DRIVE_MPS, 2) if spd > 0 else 0.0 for spd, _, dur, _ in path]
+
+ROUTE_2F_LEN = sum(m for _, m in ROUTE_2F_M)
+
+# 주행 단계: (속도, 헤딩, 지속 초, 매트릭스 표시 문자)
+# R1·R2는 같은 경로 위를 달려 같은 지점에서 꺾는다. R1은 간격만큼 앞에서, R2는 출발점에서 출발해 R1 정지점 1m 뒤까지 간다
+# 지속 시간은 SPEED_REF 기준값 — 실제 주행 때 설정 속도에 맞춰 _run_path가 늘리거나 줄인다
+def _build_follow_paths(route, gap):
+    """R2 출발점 기준 경로(route)에서 R1은 gap만큼 앞에서, R2는 출발점에서 같은 경로를 따라간다.
+    R2는 R1 정지점 min(1m, gap) 뒤까지 — R1이 꺾은 지점에서 똑같이 꺾는다"""
+    length = sum(m for _, m in route)
+    end_gap = min(FOLLOW_END_GAP_M, gap)
+    r1 = _route_to_path(_slice_route(route, gap, length), "v", DEFAULT_SPEEDS["floor2"])
+    r2 = _route_to_path(_slice_route(route, 0, length - end_gap), "v", DEFAULT_SPEEDS["rear"])
+    return r1, r2
+
+def _build_2f_paths(gap):
+    """간격(m)에 맞춘 2층 R1·R2 주행 단계"""
+    return _build_follow_paths(ROUTE_2F_M, gap)
+
+def _path_json(path):
+    return [{"step": i + 1, "char": ch, "speed": spd, "heading": hdg, "duration": dur,
+             "meters": round(dur * DRIVE_MPS, 2) if spd > 0 else 0}
+            for i, (spd, hdg, dur, ch) in enumerate(path)]
+
+GAP_MIN_M = 0.1                            # 10cm — 짧은 테스트용
+
+GAP_MAX_M = round(ROUTE_2F_LEN - 0.5, 1)   # R1이 최소 0.5m는 가야 함
+
+EVAC_PATH_2F, EVAC_PATH_R2 = _build_2f_paths(FOLLOW_GAP_M)
+
+EVAC_PATH_1F = _route_to_path(ROUTE_1F_M, "!", DEFAULT_SPEEDS["floor1"])    # 마지막: 정지 (비상구 도달)
+
+SPEED_FILE = os.path.join(ROOT, "speed_settings.json")
+
+def _load_speeds():
+    speeds = dict(DEFAULT_SPEEDS)
+    try:
+        with open(SPEED_FILE, encoding="utf-8") as f:
+            saved = json.load(f)
+        for k in speeds:
+            if isinstance(saved.get(k), int) and 1 <= saved[k] <= 255:
+                speeds[k] = saved[k]
+    except (OSError, ValueError):
+        pass
+    return speeds
+
+def _load_aim_trim():
+    """로봇별 자동 에임 보정값(도) — 자동 에임 뒤 수동 미세 조정한 만큼 누적"""
+    trim = {"floor2": 0, "rear": 0, "floor1": 0}
+    try:
+        with open(SPEED_FILE, encoding="utf-8") as f:
+            saved = json.load(f).get("aim_trim") or {}
+        for k in trim:
+            if isinstance(saved.get(k), (int, float)):
+                trim[k] = int(saved[k])
+    except (OSError, ValueError, AttributeError):
+        pass
+    return trim
+
+def _load_setting(key, default, lo, hi):
+    try:
+        with open(SPEED_FILE, encoding="utf-8") as f:
+            v = json.load(f).get(key)
+        if isinstance(v, (int, float)) and lo <= v <= hi:
+            return float(v)
+    except (OSError, ValueError, AttributeError):
+        pass
+    return default
+
+# 안내 대상 모드 — mps 비율로 Sphero 속도를 낮추고 지속 시간을 늘려 같은 거리를 간다
+TARGET_MODES = {
+    "normal": {"label": "일반",     "icon": "🚶", "mps": 1.0, "led": "표준 화살표",     "voice": "기본 안내 1회"},
+    "blind":  {"label": "시각장애", "icon": "🦯", "mps": 0.6, "led": "고휘도 단색 점멸", "voice": "상황·방향 반복 안내"},
+    "elder":  {"label": "노인",     "icon": "🧓", "mps": 0.6, "led": "대형 화살표",     "voice": "주기적으로 또렷하게"},
+    "child":  {"label": "어린이",   "icon": "🧒", "mps": 0.8, "led": "친근한 캐릭터",   "voice": "쉽고 짧은 문구"},
+}
+
+DISASTERS = {
+    "fire":  {"label": "화재", "icon": "🔥", "src": "서버 신호",
+              "note": "발화실 번호를 받는 즉시 시작 (시연: 대시보드 입력으로 수신반 신호 대체)"},
+    "quake": {"label": "지진", "icon": "🌍", "src": "가속도계 감지",
+              "note": "흔들리는 동안 음성 안내만 — 진동이 멈추고 2초 뒤 유도 시작"},
+    "black": {"label": "정전", "icon": "💡", "src": "조도 센서 감지",
+              "note": "조도 10 lux 미만 3초 지속 시 시작 — 네트워크 없이 저장 경로로 자립 유도"},
+}
+
+EXCEPTIONS = {
+    "E1": "센서 오인식 — 3초 미만 조도 하강 무시",
+    "E2": "경로 이탈 — IR 2초 끊김·경로 벗어남이면 R2 수동 조작(원격) 전환",
+    "E3": "장애물 충돌 — 0.3m 후진 후 회피 재시도",
+    "E4": "통신 단절 — 저장 경로로 계속 유도",
+    "E5": "로봇 고장 — 예비 로봇이 역할 넘겨받아 투입",
+}
+
+QUAKE_SETTLE_SEC = 2.0
+
+EXCEPTION_SHOW_SEC = 4.0
+
+SHAKE_QUIET_SEC  = 3.0  # 주행·복귀가 끝나고 이 시간 동안은 흔들기 무시
+
+_ROBOT_KEYS = ("floor2", "rear", "floor1")
+
+FRONTEND_DIR = os.path.join(ROOT, "frontend")
+
+TEST_ROUTE_M = [(0, 1.0), (270, 1.5)]   # 테스트: R1 기준 직진 1m → 좌회전 1.5m (ㄱ자). R2는 간격만큼 뒤에서 같은 경로
+
+_AIM_LABEL = {"floor2": "R1", "rear": "R2", "floor1": "R3"}

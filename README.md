@@ -71,13 +71,35 @@ IDLE → ARMED → GUIDING → HANDOFF → COMPLETE 흐름과 예외 처리 E2�
 
 | 파일 | 설명 |
 |------|------|
-| `sphero_broker.py` | Flask 브로커 서버 (BLE 연결, 경로 주행, 카메라 감지, 대시보드 내장) |
+| `sphero_broker.py` | 실행 파일 (`bandi.app.main` 호출) |
+| `bandi/` | 브로커 파이썬 패키지 — 아래 코드 구조 참고 |
+| `frontend/` | 대시보드 화면 — `templates/index.html`, `static/css`, `static/js` |
 | `floorplan_1f.png`, `floorplan_2f.png` | 대시보드용 팔달관 1·2층 도면 |
 | `brand/` | BANDI 로고(투명 배경) · 심볼 · 파비콘 |
 | `팔달관_도면.pdf`, `팔달관_도면.html` | 층별 도면 원본 (실측 기입용) |
 | `재난대피로봇_시연/index.html` | 단독 시연 페이지 (서버 없이 애니메이션만) |
 | `동작 알고리즘 개선안 v2.md` | 알고리즘 설계 문서 |
 | `Sphero 제약 시트.md` | Sphero BOLT 제약사항 정리 |
+
+### 코드 구조
+
+| 모듈 | 내용 |
+|------|------|
+| `bandi/config.py` | 로봇 이름·포트·대피 경로·주행 기본값·안내 대상 모드·재난·예외 정의, 설정 파일 읽기 |
+| `bandi/state.py` | 대시보드 공유 상태 `state`, 런타임 값 `rt`(연결된 BOLT·주행 세대 등), 이벤트 로그·예외 표시, 설정 저장 |
+| `bandi/hw.py` | 로봇 입출력 — LED·매트릭스, 주행 명령, 위치 센서 읽기·좌표 변환, 시뮬레이션 |
+| `bandi/nav.py` | 위치 기반 주행·좌표축 보정·평시 복귀(R2 U턴) |
+| `bandi/follow.py` | R2가 R1 발자국 따라가기, 모서리 정지, IR 끊김·경로 이탈 감시 |
+| `bandi/manual.py` | R2 수동 조작(원격) 진입·해제, 폰 음성 안내(TTS) 큐 |
+| `bandi/scenario.py` | 재난 신호 처리, 2층→1층 인수인계, 테스트 경로 |
+| `bandi/aim.py` | 방향 보정 — 수동 에임, 나침반 자동 에임 |
+| `bandi/camera.py` | R2 카메라 앱 감지 상태(넘어짐·시야 이탈), 프리뷰 프레임 |
+| `bandi/ble.py` | Sphero BLE 연결·센서 스트리밍·하트비트, R1 흔들기(지진) 감지 |
+| `bandi/web/` | Flask 앱 조립(`server.py`)과 Blueprint — `pages`, `api_system`, `api_robot`, `api_manual`, `api_camera` |
+| `bandi/app.py` | 진입점 — 로그 설정, BLE·감시 스레드 시작, 웹 서버 실행 |
+
+의존 방향: `config → state → hw → nav → manual → follow → scenario → ble → web` (아래 모듈이 위 모듈을 가져다 씀, 순환 없음).
+대시보드 JS는 `window.BANDI`(서버 설정값)를 받아 `frontend/static/js/*.js`를 순서대로 불러온다.
 
 ## 실행 방법
 

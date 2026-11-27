@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BANDI — 재난 대피 안내 브로커</title>
+<link rel="icon" type="image/png" href="/brand/favicon">
+<link rel="apple-touch-icon" href="/brand/symbol">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}?v={{ version }}">
+</head>
+<body>
+
+<header>
+  <img class="brand-logo" src="/brand/logo" alt="BANDI">
+  <span class="brand-sub"><b>재난 대피 안내 로봇 · 중계기 대시보드</b><br>4조 잇다(ITDA) · 팔달관</span>
+  <span class="sim-badge" id="simBadge">SIM</span>
+  <span class="state-pill" id="statePill" title="시스템 상태">IDLE</span>
+  <button class="hdr-btn" onclick="restartBroker()">↺ 브로커 재시작</button>
+</header>
+
+<div class="fall-alert" id="fallAlert" role="alert" onclick="document.getElementById('followWrapCard').scrollIntoView({behavior:'smooth'})">
+  <span class="fa-ico">⚠</span>
+  <span><b>대피자 넘어짐 감지</b> — R2 카메라 · <span id="fallSecs">0</span>초째 · 즉시 확인 필요</span>
+  <span class="fa-meta" id="fallMeta"></span>
+</div>
+
+<div class="ops">
+  <div>
+    <!-- 재난 트리거 -->
+    <div class="card">
+      <h2>재난 트리거</h2>
+      <div class="dz-btns">
+        <button class="dz fire"  id="dzfire"  onclick="sendDisaster('fire')"><span class="ico">🔥</span>화재<small>서버 신호</small></button>
+        <button class="dz quake" id="dzquake" onclick="sendDisaster('quake')"><span class="ico">🌍</span>지진<small>가속도계 감지</small></button>
+        <button class="dz black" id="dzblack" onclick="sendDisaster('black')"><span class="ico">💡</span>정전<small>조도 센서 감지</small></button>
+        <button class="dz dz-clear" onclick="sendDisaster('clear')">상황 해제 · 평시 복귀</button>
+        <button class="dz dz-clear dz-test" onclick="testRoute()">🧪 테스트 경로 — ㄱ자 (직진 1m → 좌회전 1.5m)</button>
+      </div>
+      <div class="note" id="triggerNote"></div>
+    </div>
+    <!-- 안내 대상 모드 -->
+    <div class="card">
+      <h2>안내 대상 모드</h2>
+      <div class="seg" id="seg"></div>
+      <div class="note" id="targetNote"></div>
+    </div>
+    <!-- 로봇 상태 -->
+    <div class="card">
+      <h2>로봇 상태 R1–R4</h2>
+      <div class="bots" id="bots"></div>
+    </div>
+  </div>
+  <div>
+    <!-- 대피 흐름 타임라인 -->
+    <div class="card">
+      <h2>팔달관 대피 흐름 — 2층 복도 → 계단 → 1층 로비 → 비상구</h2>
+      <div class="timeline">
+        <div class="tnode" id="tn0"><div class="tc">IDLE</div><div class="tl">대기</div></div>
+        <div class="tarrow" id="ta0">›</div>
+        <div class="tnode" id="tn1"><div class="tc">ARMED</div><div class="tl">감지</div></div>
+        <div class="tarrow" id="ta1">›</div>
+        <div class="tnode" id="tn2"><div class="tc">GUIDING</div><div class="tl">유도</div></div>
+        <div class="tarrow" id="ta2">›</div>
+        <div class="tnode" id="tn3"><div class="tc">HANDOFF</div><div class="tl">인수인계</div></div>
+        <div class="tarrow" id="ta3">›</div>
+        <div class="tnode" id="tn4"><div class="tc">COMPLETE</div><div class="tl">완료</div></div>
+      </div>
+      <div class="meta-row">
+        <span>재난 <b id="metaDisaster">없음</b></span>
+        <span>안내 대상 <b id="metaTarget">—</b></span>
+        <span>트리거→선두 출발 <b id="metaLatency">—</b> (목표 ≤ 2.0s)</span>
+      </div>
+    </div>
+    <!-- 팔달관 평면도 -->
+    <div class="card" style="padding:0; overflow:hidden;">
+      <div style="display:flex; align-items:center; justify-content:space-between; padding:12px 20px; border-bottom:1px solid var(--bdr); flex-wrap:wrap; gap:8px;">
+        <h2 style="margin:0;">🗺 팔달관 대피 경로 도면</h2>
+        <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+          <button class="btn" id="fpTab2f" style="padding:4px 10px; font-size:11px; background:var(--blu); color:#fff;"
+            onclick="floorplanTab('2f', true)">2층 · R1 R2</button>
+          <button class="btn" id="fpTab1f" style="padding:4px 10px; font-size:11px; background:var(--bdr); color:var(--txt);"
+            onclick="floorplanTab('1f', true)">1층 · R3</button>
+          <button class="btn" style="padding:4px 10px; font-size:11px; background:var(--bdr); color:var(--txt);"
+            onclick="window.open('/floorplan','_blank')">↗ PDF</button>
+          <button class="btn" style="padding:4px 10px; font-size:11px; background:var(--bdr); color:var(--txt);"
+            id="btnFloorplanToggle" onclick="toggleFloorplan()">▲ 접기</button>
+        </div>
+      </div>
+      <div id="floorplanWrap">
+        <div class="fp-stage" id="fpStage2f">
+          <img src="/floorplan-img/2f" alt="팔달관 2층 도면">
+          <div class="robot" id="robotR1"><div class="rb-dot">R1</div><div class="rb-tag">R1 선두</div></div>
+          <div class="robot rb-rear" id="robotR2"><div class="rb-dot">R2</div><div class="rb-tag">R2 후방</div></div>
+        </div>
+        <div class="fp-stage" id="fpStage1f" style="display:none;">
+          <img src="/floorplan-img/1f" alt="팔달관 1층 도면">
+          <div class="robot" id="robotR3"><div class="rb-dot">R3</div><div class="rb-tag">R3 1층</div></div>
+        </div>
+        <div class="fp-legend">
+          <span><i style="background:#9ca3af"></i>미연결</span>
+          <span><i style="background:#22c55e"></i>출발점 대기</span>
+          <span><i style="background:#f97316"></i>경로 주행 중</span>
+          <span><i style="background:#2563eb"></i>도착 (핸드오프·비상구)</span>
+          <span>위치는 경로 단계 기준 추정값</span>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div>
+    <!-- 신호 전달 경로 -->
+    <div class="card">
+      <h2>신호 전달 경로</h2>
+      <div class="cnode" id="cn0"><span class="cdot"></span><div><div class="t">재난 트리거</div><div class="d">화재: 서버 신호 / 지진·정전: 로봇 센서</div></div></div>
+      <div class="clink" id="cl0"></div>
+      <div class="cnode" id="cn1"><span class="cdot"></span><div><div class="t">중계기 (이 브로커)</div><div class="d">상태 수집 · 판단 · 명령 · 대시보드</div></div></div>
+      <div class="clink" id="cl1"></div>
+      <div class="cnode" id="cn2"><span class="cdot"></span><div><div class="t">BLE 게이트웨이</div><div class="d">랩탑 → Sphero BOLT</div></div></div>
+      <div class="clink" id="cl2"></div>
+      <div class="cnode" id="cn3"><span class="cdot"></span><div><div class="t">R1 · R2 · R3</div><div class="d">LED 화살표 · 대피 유도</div></div></div>
+      <div class="note" id="pathNote"></div>
+    </div>
+    <!-- 예외 처리 -->
+    <div class="card">
+      <h2>예외 처리 E1–E5</h2>
+      <div class="excepts" id="excepts"></div>
+      <div class="note">E4·E5는 주행 중 자동 표시. 항목을 누르면 시연용으로 수동 발생 (표시·로그만, 로봇 동작은 바뀌지 않음).</div>
+    </div>
+  </div>
+</div>
+
+<div class="grid">
+
+  <!-- 2F Sphero 카드 -->
+  <div class="card">
+    <h2>2층 Sphero (R1 선두)</h2>
+    <div class="status-row">
+      <div class="dot" id="dot2f"></div>
+      <span id="conn2f" style="font-weight:600;">연결 중…</span>
+      <span class="signal-pill" id="signalPill">대기</span>
+    </div>
+    <div class="bat-bar"><div class="bat-bar-inner" id="bat2f" style="width:0%"></div></div>
+    <div class="sub-label" id="bat2fTxt">배터리 —</div>
+    <div class="accel-row">
+      <div class="accel-box"><div class="axis">X</div><div class="val" id="ax">0.00</div></div>
+      <div class="accel-box"><div class="axis">Y</div><div class="val" id="ay">0.00</div></div>
+      <div class="accel-box"><div class="axis">Z</div><div class="val" id="az">0.00</div></div>
+    </div>
+    <div class="sub-label" style="margin-top:6px;">가속도계 (G) — 흔들기 임계: {{ cfg.SHAKE_THRESHOLD }}G</div>
+
+    <div class="path-steps" id="pathSteps2f"></div>
+    <div class="progress-bar"><div class="progress-inner" id="pathProgress2f" style="width:0%"></div></div>
+    <div class="sub-label" id="pathLabel2f" style="margin-top:6px;">대기 중</div>
+
+    <div class="btn-row">
+      <button class="btn btn-trigger" onclick="triggerSignal()">🚨 신호 발생 (수동)</button>
+    </div>
+  </div>
+
+  <!-- 1F Sphero 카드 -->
+  <div class="card">
+    <h2>1층 Sphero (R3 대기)</h2>
+    <div class="status-row">
+      <div class="dot" id="dot1f"></div>
+      <span id="conn1f" style="font-weight:600;">연결 중…</span>
+      <span id="movingBadge" style="font-size:12px; color:var(--dim);"></span>
+    </div>
+    <div class="bat-bar"><div class="bat-bar-inner" id="bat1f" style="width:0%"></div></div>
+    <div class="sub-label" id="bat1fTxt">배터리 —</div>
+
+    <div class="path-steps" id="pathSteps"></div>
+    <div class="progress-bar"><div class="progress-inner" id="pathProgress" style="width:0%"></div></div>
+    <div class="sub-label" id="pathLabel" style="margin-top:6px;">대기 중</div>
+
+    <div class="btn-row">
+      <button class="btn btn-reset" onclick="resetBroker()">🔄 리셋</button>
+    </div>
+  </div>
+
+  <!-- Sphero 연결 설정 -->
+  <div class="card connect-wrap">
+    <h2>Sphero 연결 설정</h2>
+    <div class="input-row">
+      <div class="field">
+        <label>2층 Sphero 이름 (R1 선두)</label>
+        <input id="inp2f" type="text" placeholder="SB-XXXX" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="field">
+        <label>1층 Sphero 이름 (R3 대기)</label>
+        <input id="inp1f" type="text" placeholder="SB-YYYY" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="field">
+        <label>2층 후방 Sphero 이름 (R2 트롤리)</label>
+        <input id="inpR2" type="text" placeholder="SB-ZZZZ" autocomplete="off" spellcheck="false">
+      </div>
+    </div>
+    <div class="btn-row">
+      <button class="btn btn-connect" id="btnConnect" onclick="connectSphero()">🔌 연결 시작</button>
+      <button class="btn btn-disconnect" id="btnDisconnect" onclick="disconnectSphero()">⏏ 연결 해제</button>
+    </div>
+    <p class="connect-hint" id="connectHint">Sphero Edu 앱에서 각 볼트의 이름을 확인 후 입력하세요.</p>
+  </div>
+
+  <!-- 주행 속도 -->
+  <div class="card connect-wrap">
+    <h2>주행 속도 (1~255) — 다음 주행부터 적용 · 재시작해도 유지</h2>
+    <div class="input-row">
+      <div class="field"><label>R1 앞 (2층 선두)</label><input id="spd_floor2" type="number" min="1" max="255"></div>
+      <div class="field"><label>R2 뒤 (2층 후방 · 폰 탑재)</label><input id="spd_rear" type="number" min="1" max="255"></div>
+      <div class="field"><label>R3 (1층)</label><input id="spd_floor1" type="number" min="1" max="255"></div>
+      <div class="field"><label>R2 출발 지연 (초)</label><input id="spd_r2delay" type="number" min="0" max="30" step="0.5"></div>
+      <div class="field"><label>꺾기 전 정지 (초)</label><input id="spd_turnpause" type="number" min="0" max="10" step="0.5"></div>
+      <div class="field"><label>R2 거리 보정 (%) — 덜 가면 올림</label><input id="spd_r2dist" type="number" min="50" max="200" step="1"></div>
+      <div class="field"><label>전방–후방 간격 (cm) — R1이 R2보다 앞에서 출발</label><input id="spd_gap" type="number" min="10" max="1400" step="10"></div>
+    </div>
+    <div class="btn-row" style="margin-top:0;">
+      <button class="btn btn-connect" onclick="saveSpeeds()">💾 속도 저장</button>
+      <button class="btn btn-reset" onclick="resetSpeeds()">기본값 (100 · 150 · 100 · 0초 · 1초 · 100% · 400cm)</button>
+    </div>
+    <p class="connect-hint" id="speedHint">각 로봇은 자기 속도로 구간 시간을 계산해 정해진 거리만큼만 간다. R2가 R1보다 빠르면 간격이 줄고 느리면 벌어진다 — 간격 유지는 실제 속도를 비슷하게.</p>
+  </div>
+
+  <!-- 방향 보정 -->
+  <div class="card connect-wrap">
+    <h2>방향 보정 — 기준: R2 스마트폰 셀피 정면 = 0°</h2>
+    <div class="aim-auto">
+      <span>📱 폰 셀피 정면 방위 <b id="phoneAz">—</b> <span id="phoneAzNote" class="aim-desc"></span></span>
+      <button class="btn btn-connect" onclick="autoAim()">🧭 나침반 자동 에임 (연결된 로봇 전부)</button>
+    </div>
+    <div class="aim-rows">
+{% for key, lbl, desc in aim_rows %}      <div class="aim-row">
+        <b>{{ lbl }}</b><span class="aim-desc">{{ desc }} <span class="aim-st" id="aimSt_{{ key }}"></span></span>
+        <button class="btn btn-reset" onclick="aim('{{ key }}','start')">보정 시작</button>
+        <button class="btn btn-reset" onclick="aim('{{ key }}','rotate',-15)">⟲ 15°</button>
+        <button class="btn btn-reset" onclick="aim('{{ key }}','rotate',-5)">⟲ 5°</button>
+        <button class="btn btn-reset" onclick="aim('{{ key }}','rotate',-1)">⟲ 1°</button>
+        <span class="aim-deg" id="aimDeg_{{ key }}">—</span>
+        <button class="btn btn-reset" onclick="aim('{{ key }}','rotate',1)">⟳ 1°</button>
+        <button class="btn btn-reset" onclick="aim('{{ key }}','rotate',5)">⟳ 5°</button>
+        <button class="btn btn-reset" onclick="aim('{{ key }}','rotate',15)">⟳ 15°</button>
+        <button class="btn btn-connect" onclick="aim('{{ key }}','set')">✔ 0°로 저장</button>
+        <span class="aim-trim" id="aimTrim_{{ key }}" title="자동 에임 때 더하는 보정값">보정 0°</span>
+        <button class="btn btn-reset" onclick="aim('{{ key }}','clear_trim')" title="보정값 지우기">✕</button>
+      </div>
+{% endfor %}    </div>
+    <p class="connect-hint" id="aimHint">자동 에임 뒤 살짝 틀어졌으면: 그 로봇만 보정 시작 → ⟲/⟳ 1°·5°로 맞추고 0°로 저장 (나침반 재측정 없음). 수동: 보정 시작 → 꼬리 LED(파랑)가 켜짐. 화살표로 돌려 <b>꼬리 LED가 셀피 정면의 정반대</b>를 향하게(= 로봇 정면이 셀피 정면) 맞춘 뒤 0°로 저장. 경로의 모든 회전은 이 방향 기준.</p>
+  </div>
+
+  <!-- Follow Mode 카드 -->
+  <div class="follow-log-row">
+  <div class="card follow-wrap" id="followWrapCard">
+    <h2>R2 후방 (R1 경로 추종 · 카메라 감지)</h2>
+    <div class="conn-row" style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">
+      <div class="dot" id="dotR2"></div>
+      <span id="connR2" style="font-weight:600;">연결 안됨</span>
+      <span class="sub-label" id="batR2Txt">배터리 —</span>
+    </div>
+    <div class="sub-label" style="margin-bottom:8px;">
+      앱 연결 주소
+      <code id="appUrl" title="눌러서 복사" onclick="copyAppUrl()"
+        style="cursor:pointer; color:var(--txt); background:var(--bg); border:1px solid var(--bdr);
+               border-radius:5px; padding:1px 7px; font:12px 'JetBrains Mono', monospace;">—</code>
+      <span id="appUrlCopied" style="color:var(--grn); display:none;">복사됨</span>
+    </div>
+    <div class="path-steps" id="pathStepsR2"></div>
+    <div class="sub-label" id="pathLabelR2" style="margin:6px 0 10px;">대기 중</div>
+    <div class="manual-row">
+      <button class="btn btn-manual" id="btnManual" onclick="toggleManual()">🎮 수동 조작</button>
+      <button class="btn btn-ghost" onclick="simIrLost()" title="따라가다 IR이 끊긴 상황을 흉내 내 수동 조작으로 넘김">📡 IR 끊김 테스트</button>
+      <span class="ir-chip" id="irChip" title="R2 IR 수신기로 R1 인식 여부 — 따라가는 동안만 확인">IR —</span>
+    </div>
+    <div class="manual-panel" id="manualPanel" hidden>
+      <div class="manual-reason" id="manualReason">수동 조작 중</div>
+      <div class="manual-grid">
+        <div>
+          <div class="sub-label" style="margin:0 0 6px;">주행 — 키보드 WASD 또는 방향키 · 누르는 동안 이동</div>
+          <div class="wasd">
+            <span></span><button class="key" data-cmd="w">W<small>전진</small></button><span></span>
+            <button class="key" data-cmd="a">A<small>좌 15°</small></button>
+            <button class="key" data-cmd="s">S<small>후진</small></button>
+            <button class="key" data-cmd="d">D<small>우 15°</small></button>
+          </div>
+          <div class="sub-label" id="manualHeading" style="margin-top:6px;">방향 0°</div>
+        </div>
+        <div>
+          <div class="sub-label" style="margin:0 0 6px;">R2 매트릭스</div>
+          <div class="mx-btns">
+            <button class="mx g" onclick="manualMatrix('up')" title="직진">↑</button>
+            <button class="mx g" onclick="manualMatrix('left')" title="왼쪽">←</button>
+            <button class="mx g" onclick="manualMatrix('right')" title="오른쪽">→</button>
+            <button class="mx g" onclick="manualMatrix('down')" title="뒤로">↓</button>
+            <button class="mx r" onclick="manualMatrix('stop')" title="멈춤">✕</button>
+            <button class="mx y" onclick="manualMatrix('warn')" title="주의">!</button>
+            <button class="mx m" onclick="manualMatrix('help')" title="도움 요청">?</button>
+            <button class="mx" onclick="manualMatrix('off')" title="끄기">끔</button>
+          </div>
+        </div>
+      </div>
+      <form class="tts-row" onsubmit="sendTts(event)">
+        <input id="ttsInput" type="text" maxlength="200" placeholder="폰에서 읽어 줄 안내 (예: 왼쪽 계단으로 내려가세요)" autocomplete="off">
+        <button class="btn btn-connect" type="submit">🔊 전송</button>
+      </form>
+      <div class="sub-label" id="ttsNote">스마트폰(R2)이 0.5초 안에 받아 음성으로 읽음</div>
+    </div>
+    <div class="follow-inner">
+      <div class="follow-preview-wrap" id="followPreviewWrap">
+        <span class="fall-badge">⚠ 넘어짐</span>
+        <img class="follow-preview" id="followPreview" alt="카메라 프리뷰">
+        <div class="follow-preview-placeholder" id="followPlaceholder">
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M15 10l4.553-2.069A1 1 0 0121 8.869v6.262a1 1 0 01-1.447.894L15 14M3 8a2 2 0 012-2h10a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8z"/>
+          </svg>
+          <span>앱 카메라 대기</span>
+        </div>
+        <span class="preview-age" id="previewAge" style="display:none;"></span>
+      </div>
+      <div>
+        <div class="follow-dir" id="followDir">■</div>
+        <div class="follow-info" id="followInfo">대기 중</div>
+        <div class="follow-info" id="followMetrics" title="넘어짐 판정: w/h > 1.0 또는 기울기 > 60° 가 3초 지속">w/h — · 기울기 —</div>
+        <div class="btn-row" style="margin-top:14px;">
+          <button class="btn btn-follow-on" id="btnFollowToggle" onclick="toggleFollow()">▶ 감지 ON</button>
+        </div>
+        <div class="sub-label" style="margin-top:10px;">카메라 감지는 기록·표시만 — 주행은 R1 경로를 따라감</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 이벤트 로그 -->
+  <div class="card log-wrap">
+    <h2>이벤트 로그 &nbsp;<span class="count-badge" id="triggerCount">0</span></h2>
+    <ul class="log-list" id="logList"></ul>
+  </div>
+  </div><!-- /follow-log-row -->
+
+
+</div>
+
+<footer>
+  <b>동작 흐름</b> — 트리거 발생 → 대피 유도 → 층간 인수인계 → 비상구 도달.
+  &nbsp;· <b>목표</b>: 트리거→선두 출발 ≤ 2.0초 · 비상구 유도 완료율 ≥ 80% · 모든 대피자 안내 ≥ 80%.
+  &nbsp;· 모든 모드는 1.0 m/s 이하 (보행 속도 1.2–1.4 m/s보다 느려야 로봇이 앞서지 않음).
+  &nbsp;· 키보드: <kbd>1</kbd> 화재 <kbd>2</kbd> 지진 <kbd>3</kbd> 정전 <kbd>0</kbd> 해제
+</footer>
+
+<script>window.BANDI = {{ cfg|tojson }};</script>
+<script src="{{ url_for('static', filename='js/config.js') }}?v={{ version }}"></script>
+<script src="{{ url_for('static', filename='js/manual.js') }}?v={{ version }}"></script>
+<script src="{{ url_for('static', filename='js/controls.js') }}?v={{ version }}"></script>
+<script src="{{ url_for('static', filename='js/settings.js') }}?v={{ version }}"></script>
+<script src="{{ url_for('static', filename='js/camera.js') }}?v={{ version }}"></script>
+<script src="{{ url_for('static', filename='js/floorplan.js') }}?v={{ version }}"></script>
+<script src="{{ url_for('static', filename='js/broker.js') }}?v={{ version }}"></script>
+<script src="{{ url_for('static', filename='js/main.js') }}?v={{ version }}"></script>
+<script src="{{ url_for('static', filename='js/follow.js') }}?v={{ version }}"></script>
+<script>update(); setInterval(update, 800);</script>
+</body>
+</html>
