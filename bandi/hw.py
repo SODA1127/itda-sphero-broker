@@ -143,7 +143,12 @@ def _pos(key, bolt):
     raw = _raw(key)
     if raw is None or _loc_rot[key] is None:
         return None
-    return _unrot(raw[0], raw[1], _loc_rot[key])
+    x, y = _unrot(raw[0], raw[1], _loc_rot[key])
+    if key == "rear":
+        # R2는 트롤리 때문에 바퀴가 미끄러져 위치 센서가 실제보다 많이 센다 — 'R2 거리 보정 %'만큼 줄여 실제 거리로
+        k = 100.0 / state["r2_dist_pct"]
+        x, y = x * k, y * k
+    return (x, y)
 
 def _nav_available(key, bolt):
     return (not _is_real(bolt)) or _raw(key) is not None

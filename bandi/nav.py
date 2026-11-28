@@ -233,15 +233,37 @@ def _nav_to(key, bolt, ctx, target_of, heading, speed, cancelled, calib=True, ho
         if deadline is None:
             exp = max(along, 0) / 100 / max(_mps(key, speed), 0.05)
             deadline = time.time() + exp * NAV_TIMEOUT_FACTOR + 3.0
-        if along <= NAV_STOP_CM:
+        coast = _uturn_learned.get(f"coast_{key}", 0.0)    # 멈춘 뒤 미끄러지는 만큼 일찍 멈춤 (R1·R3)
+        if along <= NAV_STOP_CM + coast:
             return "ok"
         if time.time() > deadline:
             return "timeout"
         dist = math.hypot(rx, ry)
         dev = 0.0 if dist < 15 else max(-NAV_MAX_STEER_DEG, min(NAV_MAX_STEER_DEG, _norm180(_angle_of(rx, ry) - heading)))
-        spd = speed if along > NAV_SLOW_CM else max(min(NAV_MIN_SPEED, speed), int(speed * along / NAV_SLOW_CM))
+        eff = along - coast
+        spd = speed if eff > NAV_SLOW_CM else max(min(NAV_MIN_SPEED, speed), int(speed * eff / NAV_SLOW_CM))
         _drive(key, bolt, round(heading + dev), spd)
         time.sleep(0.05)
+
+REST_SETTLE_SEC = 1.0          # 멈춘 뒤 미끄러짐이 끝날 때까지 기다리는 시간
+COAST_LEARN_MIN_PAUSE = 0.8   # 꺾기 전 정지가 이보다 길어야 미끄러짐이 끝난 위치로 학습
+
+
+def _learn_coast(key, label, goal, pos, pause):
+    """구간 끝 목표를 멈춘 뒤 얼마나 지나쳤는지 재서 다음 정지 거리에 반영 (R1·R3)"""
+    if key not in ("floor2", "floor1") or goal is None or pos is None or pause < COAST_LEARN_MIN_PAUSE:
+        return
+    (gx, gy), (ux, uy) = goal
+    over = (pos[0] - gx) * ux + (pos[1] - gy) * uy        # +: 목표를 지나침, -: 못 미침
+    if abs(over) < 3:
+        return
+    name = f"coast_{key}"
+    old = _uturn_learned[name]
+    _uturn_learned[name] = round(min(50.0, max(0.0, old + over / 2)), 1)
+    _save_settings()
+    log_event(f"  📏 {label} 구간 끝 목표를 {over:+.0f}cm {'지나침' if over > 0 else '못 미침'} → "
+              f"다음엔 {_uturn_learned[name]:.0f}cm 일찍 멈춤")
+
 
 def _run_path_nav(bolt, path, state_key, label, move_color, done_color, gen=None):
     """위치 기반 경로 실행 — 구간 끝 지점을 좌표로 정해 놓고 도착할 때까지 보정하며 간다"""
@@ -256,8 +278,10 @@ def _run_path_nav(bolt, path, state_key, label, move_color, done_color, gen=None
                 _wpts[state_key].append(p)
 
     def finish(ok):
-        mark(_pos(state_key, bolt))
         _halt(state_key, bolt, prev_heading or 0)
+        if ok and _is_real(bolt):
+            time.sleep(REST_SETTLE_SEC)        # 미끄러짐이 끝난 실제 위치를 기록 (평시 복귀 지점)
+        mark(_pos(state_key, bolt))
         with _state_lock:
             state[state_key]["moving"] = False
             state[state_key]["step"]   = 0
@@ -286,7 +310,7 @@ def _run_path_nav(bolt, path, state_key, label, move_color, done_color, gen=None
     with _trail_lock:
         if not _wpts[state_key] and ctx["start"] is not None:
             _wpts[state_key].append(ctx["start"])
-    prev_heading, leg = None, 0
+    prev_heading, leg, last_goal = None, 0, None
     log_event(f"  📍 {label} 위치 기반 주행")
 
     for i, (spd, heading, dur, char) in enumerate(path):
@@ -294,7 +318,6 @@ def _run_path_nav(bolt, path, state_key, label, move_color, done_color, gen=None
             return finish(False)
         m = meters[i]
         if m > 0 and prev_heading is not None and heading != prev_heading:
-            mark(_pos(state_key, bolt))
             _halt(state_key, bolt, prev_heading)
             if turn_pause > 0:
                 turn = (heading - prev_heading) % 360
@@ -305,6 +328,12 @@ def _run_path_nav(bolt, path, state_key, label, move_color, done_color, gen=None
                     time.sleep(0.05)
                 if cancelled():
                     return finish(False)
+                if _is_real(bolt):            # 시뮬레이션 로봇은 미끄러지지 않으므로 학습 안 함
+                    _learn_coast(state_key, label, last_goal, _pos(state_key, bolt), turn_pause)
+            elif _is_real(bolt):
+                time.sleep(REST_SETTLE_SEC)
+            # 꺾은 지점 = 멈춰서 미끄러짐이 끝난 위치 — 정지 명령 순간 위치는 미끄러짐만큼 앞이라 복귀 때 대각선이 됨
+            mark(_pos(state_key, bolt))
         with _state_lock:
             state[state_key]["step"] = i + 1
         _set_matrix(bolt, *move_color, "^" if m > 0 else char)
@@ -322,6 +351,8 @@ def _run_path_nav(bolt, path, state_key, label, move_color, done_color, gen=None
         t0 = time.time()
         res = _nav_to(state_key, bolt, ctx, lambda st, k=k: (st[0] + offs[k][0], st[1] + offs[k][1]),
                       heading, speed, cancelled)
+        if ctx.get("start") is not None:
+            last_goal = ((ctx["start"][0] + offs[k][0], ctx["start"][1] + offs[k][1]), _vec(heading))
         with _trail_lock:
             _trail[state_key].append((heading, speed, round(time.time() - t0, 2)))
         leg += 1
@@ -376,6 +407,39 @@ def _return_home_inner(key, gen):
         return _return_home_nav(key, gen)
     return _return_home_time(key, gen)
 
+R2_ALIGN_WAIT_SEC = 10.0   # R2가 U턴 전에 R1 복귀가 끝나기를 기다리는 최대 시간
+R2_ALIGN_MAX_CM   = 30.0   # R1에 맞춰 좌우로 옮기는 최대 거리
+
+
+def _align_r2_to_r1(label, path_pts, uturn, r1_home, cancelled, bolt, cur_h):
+    """U턴 직전: R1 복귀가 끝나기를 기다렸다가, R1이 출발점에서 좌우로 벗어난 만큼 U턴 지점을 옮김
+    → R2가 R1 바로 뒤(같은 줄)에 서게. 반환: 옮긴 다음 목표(U턴 30cm 앞 지점)"""
+    if cur_h is not None:
+        _halt("rear", bolt, cur_h)
+    with _state_lock:
+        state["rear"]["align_wait"] = True
+    try:
+        t_end = time.time() + R2_ALIGN_WAIT_SEC
+        while state["floor2"].get("returning") and time.time() < t_end and not cancelled():
+            time.sleep(0.1)
+    finally:
+        with _state_lock:
+            state["rear"]["align_wait"] = False
+    r1 = _common("floor2", _pos("floor2", rt.bolt_2f))
+    if r1 is None or state["floor2"].get("returning"):
+        return path_pts[-2]
+    lx, ly = _vec(uturn[3] + 90)                       # 다가오는 방향의 오른쪽
+    off = (r1[0] - r1_home[0]) * lx + (r1[1] - r1_home[1]) * ly
+    off = max(-R2_ALIGN_MAX_CM, min(R2_ALIGN_MAX_CM, off))
+    if abs(off) >= 3:
+        for j in (-2, -1):
+            x, y = path_pts[j]
+            path_pts[j] = (x + lx * off, y + ly * off)
+        # 다가오는 방향(back)의 오른쪽 = R2가 U턴 뒤 바라보는 방향의 왼쪽 → 사람이 보기엔 R1 쪽으로 맞춤
+        log_event(f"  ↔ {label} R1이 선 자리에 맞춰 U턴 지점을 {abs(off):.0f}cm 옮김")
+    return path_pts[-2]
+
+
 def _return_home_nav(key, gen):
     label = _AIM_LABEL[key]
     bolt = _bolt_of(key)
@@ -395,8 +459,8 @@ def _return_home_nav(key, gen):
     if key == "floor2" and _active("rear"):
         keep = min(FOLLOW_END_GAP_M, state["follow_gap"]) * 100 + 10
         def hold():
-            if not state["rear"].get("returning"):
-                return False
+            if not state["rear"].get("returning") or state["rear"].get("align_wait"):
+                return False                     # R2가 R1 복귀 끝나기를 기다리는 중이면 R1은 계속 감
             a = _common("floor2", _pos("floor2", rt.bolt_2f))
             b2 = _pos("rear", rt.bolt_r2)
             return a is not None and b2 is not None and math.hypot(a[0] - b2[0], a[1] - b2[1]) < keep
@@ -417,6 +481,9 @@ def _return_home_nav(key, gen):
         uturn = (best[1], best[2], shift, back)
         lead_in = (best[2][0] - bx * 30, best[2][1] - by * 30)     # U턴 지점 30cm 앞
         path_pts[-1:] = [lead_in, best[2]]
+        # R1 출발점(공통 좌표) — 복귀 끝에 R1이 실제로 선 자리와 비교해 R2를 R1 바로 뒤로 맞춤
+        with _trail_lock:
+            r1_home = _common("floor2", _wpts["floor2"][0]) if _active("floor2") and _wpts["floor2"] else None
     with _state_lock:
         state[key]["returning"] = True
         state[key]["return_secs"] = round(sum(
@@ -427,7 +494,10 @@ def _return_home_nav(key, gen):
               + (f", U턴 {'오른쪽' if uturn[0] > 0 else '왼쪽'} 옆 {uturn[2]:.0f}cm·앞뒤 {-_uturn_learned['along']:+.0f}cm 보정" if uturn else "") + ")")
     try:
         cur_h = None
-        for tgt in path_pts:
+        for i_t, tgt in enumerate(path_pts):
+            if uturn and r1_home is not None and i_t == len(path_pts) - 2:
+                tgt = _align_r2_to_r1(label, path_pts, uturn, r1_home, cancelled, bolt, cur_h)
+                uturn = (uturn[0], path_pts[-1], uturn[2], uturn[3])
             p = _pos(key, bolt)
             if p is None:
                 log_event(f"⚠ {label} 위치 신호 끊김 — 복귀 중단")

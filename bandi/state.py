@@ -140,7 +140,10 @@ def raise_exception(eid: str, detail: str = ""):
 # corner_slide: R2가 모서리 앞에서 멈춘 뒤 트롤리에 밀려 미끄러지는 거리 — 그만큼 일찍 멈춤
 _uturn_learned = {"side": _load_setting("uturn_side", 35.0, 0, 200),
                   "along": _load_setting("uturn_along", -25.0, -150, 150),
-                  "corner_slide": _load_setting("corner_slide", 12.0, 3, 60)}
+                  "corner_slide": _load_setting("corner_slide", 12.0, 3, 60),
+                  # R1·R3가 구간 끝에서 멈춘 뒤 미끄러져 목표를 지나치는 거리 — 그만큼 일찍 멈춤
+                  "coast_floor2": _load_setting("coast_floor2", 0.0, 0, 60),
+                  "coast_floor1": _load_setting("coast_floor1", 0.0, 0, 60)}
 
 _test_running = {"on": False}
 
@@ -151,7 +154,8 @@ def _save_settings():
                 "r2_dist_pct": state["r2_dist_pct"], "follow_gap": state["follow_gap"],
                 "shake_detect": int(state["shake_detect"]),
                 "uturn_side": _uturn_learned["side"], "uturn_along": _uturn_learned["along"],
-                "corner_slide": _uturn_learned["corner_slide"]}
+                "corner_slide": _uturn_learned["corner_slide"],
+                "coast_floor2": _uturn_learned["coast_floor2"], "coast_floor1": _uturn_learned["coast_floor1"]}
     try:
         with open(SPEED_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f)

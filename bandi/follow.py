@@ -39,6 +39,9 @@ FOLLOW_LOOKAHEAD_CM = 30.0   # R2가 바라보는 앞쪽 거리 — 클수록 �
 FOLLOW_DEADBAND_CM  = 4.0    # 경로선에서 이 안쪽으로 벗어난 건 무시하고 경로 방향으로 감 (출발 직후 갑자기 꺾이지 않게)
 
 FOLLOW_TOL_CM       = 4.0    # 목표 간격까지 이만큼 남으면 멈춤
+FOLLOW_CORNER_REACH_CM = 5.0    # 모서리에서 멈춘 뒤 이보다 많이 남았으면 마저 전진하고 돎
+FOLLOW_CORNER_REACH_SEC = 4.0   # 마저 전진 제한 시간
+FOLLOW_MIN_SPEED_RATIO = 0.75   # 감속해도 R2 속도의 이 비율 아래로는 안 내림 — 트롤리를 끌면 저속에서 바퀴가 섬
 
 FOLLOW_STALL_SEC    = 15.0   # R1이 끝났는데 이만큼 진척이 없으면 종료
 
@@ -177,6 +180,7 @@ def _run_r2_follow(gen, fallback_path=None):
     gap = state["follow_gap"] * 100
     end_gap = min(FOLLOW_END_GAP_M, state["follow_gap"]) * 100
     speed = min(255, int(state["speeds"][key] * TARGET_MODES[state["target"]]["mps"]))
+    min_spd = max(NAV_MIN_SPEED, int(speed * FOLLOW_MIN_SPEED_RATIO))
     # R2가 출발하는 순간 R1이 실제로 있던 자리 — R2는 먼저 이 점으로 간 뒤 R1이 지나간 길을 따라간다
     # (R1이 직전 복귀 오차 등으로 '정면 간격만큼 앞'에 정확히 있지 않아도 흐름대로 따라가게)
     r1_now = _pos("floor2", rt.bolt_2f) or _raw("floor2")
@@ -311,6 +315,27 @@ def _run_r2_follow(gen, fallback_path=None):
                     _save_settings()
                     log_event(f"  📏 {label} 모서리 정지 후 미끄러짐 {slide:.0f}cm → 다음 정지 거리 "
                               f"{_uturn_learned['corner_slide']:.0f}cm")
+                    # 아직 모서리(R1이 꺾은 지점) 전이면 그 지점까지 마저 간 뒤 돈다 — 일찍 꺾지 않게
+                    ux, uy = (bx - ax) / seg, (by - ay) / seg
+                    left = (bx - after_p[0]) * ux + (by - after_p[1]) * uy
+                    if left > FOLLOW_CORNER_REACH_CM:
+                        log_event(f"  ↪ {label} 모서리까지 {left:.0f}cm 남음 — 마저 전진 후 회전")
+                        t_end = time.time() + FOLLOW_CORNER_REACH_SEC
+                        while time.time() < t_end and not cancelled():
+                            q = _pos(key, bolt)
+                            if q is None:
+                                break
+                            left = (bx - q[0]) * ux + (by - q[1]) * uy
+                            if left <= FOLLOW_CORNER_REACH_CM:
+                                break
+                            _drive(key, bolt, round(_angle_of(bx - q[0], by - q[1])) % 360, min(min_spd, speed))
+                            feed()
+                            time.sleep(0.05)
+                        _halt(key, bolt, cur_h)
+                        t_end = time.time() + 0.3
+                        while time.time() < t_end and not cancelled():
+                            feed()
+                            time.sleep(0.05)
                 cur_h = round(new_h) % 360
                 _drive(key, bolt, cur_h, 0)          # 제자리 회전
                 t_end = time.time() + 0.6
@@ -322,7 +347,7 @@ def _run_r2_follow(gen, fallback_path=None):
                 continue
             cx, cy = _crumb_point(crumbs, cs)
             cur_h = round(_angle_of(cx - p[0], cy - p[1]))
-            spd = max(min(NAV_MIN_SPEED, speed), min(speed, int(speed * to_c / NAV_SLOW_CM)))
+            spd = max(min(min_spd, speed), min(speed, int(speed * to_c / NAV_SLOW_CM)))
             _drive(key, bolt, cur_h, spd)
             moving = True
             time.sleep(0.05)
@@ -332,7 +357,7 @@ def _run_r2_follow(gen, fallback_path=None):
             cur_h = round(_angle_of(tx - qx, ty - qy)) if math.hypot(tx - qx, ty - qy) > 1 else cur_h
         else:                                      # 벗어남 — 앞쪽 지점을 겨눠 돌아옴
             cur_h = round(_angle_of(tx - p[0], ty - p[1]))
-        spd = speed if remaining > NAV_SLOW_CM else max(min(NAV_MIN_SPEED, speed), int(speed * remaining / NAV_SLOW_CM))
+        spd = speed if remaining > NAV_SLOW_CM else max(min(min_spd, speed), int(speed * remaining / NAV_SLOW_CM))
         _drive(key, bolt, cur_h, spd)
         moving = True
         time.sleep(0.05)
