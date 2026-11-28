@@ -4,6 +4,7 @@ import os
 
 from flask import Blueprint, current_app, render_template
 
+from .. import matrix as _mx
 from ..config import (
     DEFAULT_R2_DELAY_SEC,
     DEFAULT_R2_DIST_PCT,
@@ -47,6 +48,7 @@ def _frontend_config():
         "DEFAULT_R2_DELAY_SEC": DEFAULT_R2_DELAY_SEC, "DEFAULT_TURN_PAUSE_SEC": DEFAULT_TURN_PAUSE_SEC,
         "DEFAULT_R2_DIST_PCT": DEFAULT_R2_DIST_PCT, "FOLLOW_GAP_M": FOLLOW_GAP_M,
         "ROUTE_2F_LEN_M": [m for _, m in ROUTE_2F_M], "ROUTE_1F_LEN_M": [m for _, m in ROUTE_1F_M],
+        "MATRIX_PATTERNS": _mx.catalog(),
     }
 
 def _static_version():

@@ -63,6 +63,32 @@ _ANIM_ID = {name: i for i, name in enumerate(PATTERNS)}
 
 GUIDE_BY_TARGET = {"normal": "guide", "blind": "guide_blind", "elder": "guide_big", "child": "guide_child"}
 
+# 대시보드 미리보기 버튼 — 수정안 '재난별 동작' 번호 순서
+LABELS = {
+    "alarm_fire":  ("② 화재 경보", "빨강 깜빡 1.5초"),
+    "alarm_quake": ("② 지진 경보", "주황 깜빡 · 흔들리는 동안"),
+    "alarm_black": ("② 정전 경보", "흰색 깜빡 1.5초"),
+    "guide":       ("⑤ 길 안내 · 일반", "초록 켜둠"),
+    "guide_blind": ("⑤ 길 안내 · 시각장애", "초록 최대 밝기 깜빡"),
+    "guide_big":   ("⑤ 길 안내 · 노인", "큰 화살표"),
+    "guide_child": ("⑤ 길 안내 · 어린이", "화살표 2초 · 얼굴 1초"),
+    "turn_right":  ("⑥ 오른쪽으로 돌 때", "돌기 전 미리"),
+    "turn_left":   ("⑥ 왼쪽으로 돌 때", "돌기 전 미리"),
+    "person":      ("⑩ 사람이 안 따라옴", "노랑 깜빡 (R1)"),
+    "stairs":      ("⑫ 계단 앞 도착", "초록 켜둠"),
+    "estop":       ("⑬ 비상 정지", "빨강 전체"),
+    "exit":        ("⑭ 1층 비상구 도착", "초록 전체 (R3)"),
+    "return":      ("⑰ 평시 복귀", "흐린 흰색"),
+}
+
+
+def catalog():
+    """대시보드가 그림을 그릴 수 있게 — 이름·설명·프레임(8줄 문자열, 꺼짐은 None)·색·fps"""
+    return [{"name": n, "label": LABELS[n][0], "desc": LABELS[n][1],
+             "frames": [SHAPES.get(s) for s in PATTERNS[n][0]],
+             "color": "#%02x%02x%02x" % PATTERNS[n][1], "fps": PATTERNS[n][2]}
+            for n in LABELS]
+
 _lock = threading.Lock()
 _layers = {}      # key → {"base": 이름|None, "overlay": 이름|None}
 _shown = {}       # key → 마지막으로 보낸 화면 (같은 걸 다시 보내지 않음)

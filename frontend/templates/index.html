@@ -246,6 +246,22 @@
     <p class="connect-hint" id="aimHint">자동 에임 뒤 살짝 틀어졌으면: 그 로봇만 보정 시작 → ⟲/⟳ 1°·5°로 맞추고 0°로 저장 (나침반 재측정 없음). 수동: 보정 시작 → 꼬리 LED(파랑)가 켜짐. 화살표로 돌려 <b>꼬리 LED가 셀피 정면의 정반대</b>를 향하게(= 로봇 정면이 셀피 정면) 맞춘 뒤 0°로 저장. 경로의 모든 회전은 이 방향 기준.</p>
   </div>
 
+  <!-- LED 매트릭스 미리보기 -->
+  <div class="card connect-wrap">
+    <h2>LED 매트릭스 미리보기 — 상황별 화면을 로봇에 띄워 보기</h2>
+    <div class="mxp-robots">
+      <span class="aim-desc">띄울 로봇</span>
+      <button class="mxp-rb on" data-k="floor2">R1</button>
+      <button class="mxp-rb" data-k="rear">R2</button>
+      <button class="mxp-rb" data-k="floor1">R3</button>
+      <button class="btn btn-reset" onclick="matrixPreview(null)">끄기</button>
+      <span class="mxp-msg" id="mxpMsg"></span>
+      <span class="mxp-now" id="mxpNow"></span>
+    </div>
+    <div class="mxp-grid" id="mxpGrid"></div>
+    <p class="connect-hint">버튼을 누르면 고른 로봇 매트릭스에 그 상황 화면이 나옵니다 (깜빡임 포함, 위쪽 = 로봇이 가는 방향). 주행·복귀·비상 정지 중에는 안 되고, 재난이 시작되면 그 단계 화면으로 바뀝니다.</p>
+  </div>
+
   <!-- Follow Mode 카드 -->
   <div class="follow-log-row">
   <div class="card follow-wrap" id="followWrapCard">
@@ -351,6 +367,7 @@
 <script src="{{ url_for('static', filename='js/camera.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/floorplan.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/broker.js') }}?v={{ version }}"></script>
+<script src="{{ url_for('static', filename='js/matrix.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/main.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/follow.js') }}?v={{ version }}"></script>
 <script>update(); setInterval(update, 800);</script>

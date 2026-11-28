@@ -4,6 +4,7 @@ import time
 
 from flask import Blueprint, jsonify, request as flask_request
 
+from .. import matrix as _mx
 from ..aim import PHONE_HEADING_MAX_AGE
 from ..follow import _set_ir
 from ..hw import _drive, _drive_reverse, _halt, _set_matrix
@@ -17,7 +18,7 @@ from ..manual import (
     _manual_lock,
     _queue_tts,
 )
-from ..state import _active, log_event, rt, state
+from ..state import _active, _robots_in_motion, log_event, rt, state
 
 bp = Blueprint("api_manual", __name__)
 
@@ -91,3 +92,32 @@ def api_manual_tts():
     phone = state.get("phone") or {}
     online = bool(phone) and time.time() - phone.get("ts", 0) < PHONE_HEADING_MAX_AGE
     return jsonify({"ok": True, "phone_online": online})
+
+_ROBOT_LABEL = {"floor2": "R1", "rear": "R2", "floor1": "R3"}
+
+@bp.route("/api/matrix/preview", methods=["POST"])
+def api_matrix_preview():
+    """상황별 매트릭스 미리보기 — {robots: ["floor2", ...], pattern: 이름 | null(끄기)}.
+    주행·복귀·비상 정지 중에는 화면이 섞이므로 막는다. 다음 재난·주행이 시작되면 그 화면으로 바뀜"""
+    data = flask_request.get_json(silent=True) or {}
+    name = data.get("pattern")
+    robots = [k for k in (data.get("robots") or []) if k in _ROBOT_LABEL]
+    if name is not None and name not in _mx.PATTERNS:
+        return jsonify({"ok": False, "error": "알 수 없는 화면"}), 400
+    if not robots:
+        return jsonify({"ok": False, "error": "로봇을 하나 이상 고르세요"}), 400
+    if state.get("estop"):
+        return jsonify({"ok": False, "error": "비상 정지 중 — 먼저 '리셋'"}), 400
+    if _robots_in_motion():
+        return jsonify({"ok": False, "error": "주행·복귀 중에는 미리보기 불가"}), 400
+    on = [k for k in robots if _active(k)]
+    if not on:
+        return jsonify({"ok": False, "error": "고른 로봇이 연결 안 됨"}), 400
+    for k in on:
+        if name is None:
+            _mx.off(k)
+        else:
+            _mx.show(k, name)
+    label = _mx.LABELS[name][0] if name else "끄기"
+    log_event(f"  🖼 매트릭스 미리보기 {label} → {', '.join(_ROBOT_LABEL[k] for k in on)}")
+    return jsonify({"ok": True, "robots": on})

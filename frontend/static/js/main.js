@@ -7,6 +7,7 @@ function update() {
       if (d.follow_gap != null) FOLLOW_GAP_M = d.follow_gap;
       testRunning = !!d.test_running;
       renderManual(d);
+      renderMatrixState(d);
       // sim badge
       if (d.sim_mode) document.getElementById('simBadge').style.display = 'inline-block';
 
