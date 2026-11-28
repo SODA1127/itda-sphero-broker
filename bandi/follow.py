@@ -18,14 +18,25 @@ from .nav import (
     _trail_lock,
     _wpts,
 )
-from .state import _active, _mark_motion_end, _state_lock, log_event, raise_exception, rt, state
+from .state import (
+    _active,
+    _mark_motion_end,
+    _save_settings,
+    _state_lock,
+    _uturn_learned,
+    log_event,
+    raise_exception,
+    rt,
+    state,
+)
 
 
 # 공통 좌표 = R2 출발점 기준 (R1·R2는 같은 방향으로 에임, R1은 간격만큼 앞에 놓음).
 # R1이 실제로 지나간 자리를 발자국으로 남기고, R2는 경로 거리로 항상 간격만큼 뒤 지점을 쫓는다.
 FOLLOW_CRUMB_CM     = 3.0    # R1 발자국 간격
 
-FOLLOW_LOOKAHEAD_CM = 15.0   # R2가 바라보는 앞쪽 거리 — 작을수록 모서리를 정확히, 클수록 부드럽게
+FOLLOW_LOOKAHEAD_CM = 30.0   # R2가 바라보는 앞쪽 거리 — 클수록 작은 옆 오차에 덜 꺾임 (모서리는 따로 멈춰 돎)
+FOLLOW_DEADBAND_CM  = 4.0    # 경로선에서 이 안쪽으로 벗어난 건 무시하고 경로 방향으로 감 (출발 직후 갑자기 꺾이지 않게)
 
 FOLLOW_TOL_CM       = 4.0    # 목표 간격까지 이만큼 남으면 멈춤
 
@@ -73,7 +84,7 @@ def _simplify(points, tol=6.0):
 
 FOLLOW_CORNER_DEG     = 50.0   # R1 발자국이 이만큼 꺾이면 모서리로 봄
 
-FOLLOW_CORNER_STOP_CM = 12.0   # 모서리 이만큼 앞에서 멈춤 — 멈춘 뒤 트롤리에 밀려 미끄러지는 거리만큼
+# 모서리 정지 거리 = 학습한 미끄러짐(_uturn_learned["corner_slide"]) — 모서리마다 실측해 갱신
 
 FOLLOW_TRACE = os.path.join(tempfile.gettempdir(), "bandi_follow_trace.csv")
 
@@ -156,7 +167,7 @@ def _set_ir(status):
     with _state_lock:
         state["ir"] = status
 
-def _run_r2_follow(gen):
+def _run_r2_follow(gen, fallback_path=None):
     """R2가 R1 발자국을 간격만큼 뒤에서 따라감. R1이 끝나면 도착 간격까지 다가가 멈춤"""
     key, bolt, label = "rear", rt.bolt_r2, "R2"
     cancelled = lambda: gen != rt.run_gen or state["manual"]["on"]
@@ -166,14 +177,20 @@ def _run_r2_follow(gen):
     gap = state["follow_gap"] * 100
     end_gap = min(FOLLOW_END_GAP_M, state["follow_gap"]) * 100
     speed = min(255, int(state["speeds"][key] * TARGET_MODES[state["target"]]["mps"]))
+    # R2가 출발하는 순간 R1이 실제로 있던 자리 — R2는 먼저 이 점으로 간 뒤 R1이 지나간 길을 따라간다
+    # (R1이 직전 복귀 오차 등으로 '정면 간격만큼 앞'에 정확히 있지 않아도 흐름대로 따라가게)
+    r1_now = _pos("floor2", rt.bolt_2f) or _raw("floor2")
     p0 = _pos(key, bolt)
     if p0 is None and _is_real(bolt) and _raw(key) is not None and _loc_rot[key] is None:
         p0 = _calibrate_axes(key, bolt, 0, speed, cancelled)    # 0° = R1 출발점 쪽 (경로 위)
     if p0 is None:
         log_event(f"  ⏱ {label} 위치 센서 없음 — 계획 경로로 주행")
-        _, path_r2 = _build_2f_paths(state["follow_gap"])
+        # 위치 센서가 없으면 시간 기반으로 — 테스트 경로면 테스트 경로를, 아니면 2층 대피 경로를
+        path_r2 = fallback_path or _build_2f_paths(state["follow_gap"])[1]
         return _run_path_time(bolt, path_r2, key, label, (255, 180, 0), (255, 0, 0), gen)
-    crumbs = [(p0[0], p0[1], 0.0), (p0[0], p0[1] + gap, gap)]      # R2 출발점 → R1 출발점
+    r1_start = _common("floor2", r1_now) if r1_now is not None else (p0[0], p0[1] + gap)
+    d0 = math.hypot(r1_start[0] - p0[0], r1_start[1] - p0[1]) or gap
+    crumbs = [(p0[0], p0[1], 0.0), (r1_start[0], r1_start[1], d0)]   # R2 출발점 → R1이 출발 전 있던 자리
     with _trail_lock:
         if not _wpts[key]:
             _wpts[key].append(p0)
@@ -182,7 +199,8 @@ def _run_r2_follow(gen):
         state[key].update(moving=True, done=False, step=1, progress_m=0.0)
     _set_led(bolt, 255, 180, 0)
     _set_matrix(bolt, 255, 180, 0, "^")
-    log_event(f"  📍 {label} R1 좌표 따라가기 — 간격 {gap:g}cm, 도착 간격 {end_gap:g}cm")
+    log_event(f"  📍 {label} R1 좌표 따라가기 — 간격 {gap:g}cm, 도착 간격 {end_gap:g}cm · "
+              f"먼저 R1 출발 자리 ({r1_start[0]:.0f}, {r1_start[1]:.0f})로 {d0:.0f}cm")
     _trace(None)
     _trace("t,R1x,R1y,R1s,R2x,R2y,R2s,target_s,heading,moving,leader_done")
     r2_s, idx, moving, last_s, last_t, cur_h = 0.0, 0, False, 0.0, time.time(), 0
@@ -272,14 +290,27 @@ def _run_r2_follow(gen):
         if corner is not None:
             cs, new_h = corner
             to_c = cs - r2_s
-            if to_c <= FOLLOW_CORNER_STOP_CM:
+            if to_c <= _uturn_learned["corner_slide"]:
                 _halt(key, bolt, cur_h)
                 moving = False
-                log_event(f"  ↪ {label} 모서리 앞 정지 → {new_h:.0f}° 방향으로 회전")
+                stop_p = p
+                log_event(f"  ↪ {label} 모서리 {to_c:.0f}cm 앞 정지 → {new_h:.0f}° 방향으로 회전")
                 t_end = time.time() + state["turn_pause"]
                 while time.time() < t_end and not cancelled():
                     feed()
                     time.sleep(0.05)
+                # 멈춘 뒤 실제로 미끄러진 거리 → 다음 모서리 정지 거리에 반영
+                after_p = _pos(key, bolt)
+                if after_p is not None:
+                    ax, ay = _crumb_point(crumbs, max(0.0, cs - 20))
+                    bx, by = _crumb_point(crumbs, cs)
+                    seg = math.hypot(bx - ax, by - ay) or 1.0
+                    slide = ((after_p[0] - stop_p[0]) * (bx - ax) + (after_p[1] - stop_p[1]) * (by - ay)) / seg
+                    old = _uturn_learned["corner_slide"]
+                    _uturn_learned["corner_slide"] = round(min(60.0, max(3.0, (old + max(0.0, slide)) / 2)), 1)
+                    _save_settings()
+                    log_event(f"  📏 {label} 모서리 정지 후 미끄러짐 {slide:.0f}cm → 다음 정지 거리 "
+                              f"{_uturn_learned['corner_slide']:.0f}cm")
                 cur_h = round(new_h) % 360
                 _drive(key, bolt, cur_h, 0)          # 제자리 회전
                 t_end = time.time() + 0.6
@@ -297,7 +328,10 @@ def _run_r2_follow(gen):
             time.sleep(0.05)
             continue
         tx, ty = _crumb_point(crumbs, min(r2_s + FOLLOW_LOOKAHEAD_CM, target_s))
-        cur_h = round(_angle_of(tx - p[0], ty - p[1]))
+        if off < FOLLOW_DEADBAND_CM:               # 경로선 위 — 경로 방향 그대로
+            cur_h = round(_angle_of(tx - qx, ty - qy)) if math.hypot(tx - qx, ty - qy) > 1 else cur_h
+        else:                                      # 벗어남 — 앞쪽 지점을 겨눠 돌아옴
+            cur_h = round(_angle_of(tx - p[0], ty - p[1]))
         spd = speed if remaining > NAV_SLOW_CM else max(min(NAV_MIN_SPEED, speed), int(speed * remaining / NAV_SLOW_CM))
         _drive(key, bolt, cur_h, spd)
         moving = True

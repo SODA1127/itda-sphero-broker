@@ -503,7 +503,8 @@ def _calibrate_axes(key, bolt, heading, speed, cancelled):
     raw0 = _raw(key)
     if raw0 is None:
         return None
-    deadline = time.time() + max(4.0, 0.3 / max(_mps(key, speed), 0.05) * 3)
+    t0 = time.time()
+    deadline = t0 + max(4.0, 0.3 / max(_mps(key, speed), 0.05) * 3)
     while not cancelled() and time.time() < deadline:
         raw = _raw(key)
         if raw is None:
@@ -516,6 +517,12 @@ def _calibrate_axes(key, bolt, heading, speed, cancelled):
         _drive(key, bolt, heading, speed)
         time.sleep(0.05)
     _halt(key, bolt, heading)
+    if not cancelled():
+        raw = _raw(key)
+        moved = math.hypot(raw[0] - raw0[0], raw[1] - raw0[1]) if raw else None
+        log_event(f"  ⚠ {_AIM_LABEL[key]} 좌표축 보정 실패 — "
+                  + ("위치 신호 끊김" if raw is None
+                     else f"{time.time() - t0:.0f}초 동안 위치 변화 {moved:.0f}cm (바퀴가 헛돌거나 위치 값이 안 바뀜)"))
     return None
 
 def _run_path_time(bolt, path, state_key, label, move_color, done_color, gen=None):

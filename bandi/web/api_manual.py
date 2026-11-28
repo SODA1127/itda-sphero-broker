@@ -9,12 +9,15 @@ from ..follow import _set_ir
 from ..hw import _drive, _drive_reverse, _halt, _set_matrix
 from ..manual import (
     MANUAL_MATRIX,
-    MANUAL_SPEED,
     MANUAL_TURN_DEG,
     _enter_manual,
     _exit_manual,
+    _flush_manual_turn,
+    _log_manual_drive,
     _manual_last,
     _manual_lock,
+    manual_speed,
+    _note_manual_turn,
     _queue_tts,
 )
 from ..state import _active, log_event, rt, state
@@ -51,21 +54,27 @@ def api_manual_drive():
         return jsonify({"ok": False, "error": "cmd는 w/a/s/d/stop"}), 400
     with _manual_lock:
         _manual_last["ts"] = time.time()
+        prev = m["cmd"]
+        speed = manual_speed()
         if cmd in ("a", "d"):
+            _note_manual_turn(m["heading"])
             m["heading"] = int(m["heading"] + (MANUAL_TURN_DEG if cmd == "d" else -MANUAL_TURN_DEG)) % 360
             if m["cmd"] == "s":
-                _drive_reverse("rear", rt.bolt_r2, m["heading"], MANUAL_SPEED)   # 후진 중이면 앞 방향만 바꿈
+                _drive_reverse("rear", rt.bolt_r2, m["heading"], speed)   # 후진 중이면 앞 방향만 바꿈
             else:                                              # 전진 중이면 방향만, 서 있으면 제자리 회전
-                _drive("rear", rt.bolt_r2, m["heading"], MANUAL_SPEED if m["cmd"] == "w" else 0)
+                _drive("rear", rt.bolt_r2, m["heading"], speed if m["cmd"] == "w" else 0)
         elif cmd == "w":
             m["cmd"] = "w"
-            _drive("rear", rt.bolt_r2, m["heading"], MANUAL_SPEED)
+            _drive("rear", rt.bolt_r2, m["heading"], speed)
         elif cmd == "s":
             m["cmd"] = "s"
-            _drive_reverse("rear", rt.bolt_r2, m["heading"], MANUAL_SPEED)   # 방향 그대로 뒤로
+            _drive_reverse("rear", rt.bolt_r2, m["heading"], speed)   # 방향 그대로 뒤로
         else:
             m["cmd"] = None
             _halt("rear", rt.bolt_r2, m["heading"])
+        if m["cmd"] != prev:                       # 전진·후진·정지가 바뀔 때만 기록
+            _flush_manual_turn(force=True)
+            _log_manual_drive(m["cmd"], m["heading"])
     return jsonify({"ok": True, "heading": m["heading"]})
 
 @bp.route("/api/manual/matrix", methods=["POST"])

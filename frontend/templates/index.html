@@ -154,7 +154,8 @@
       <div class="accel-box"><div class="axis">Y</div><div class="val" id="ay">0.00</div></div>
       <div class="accel-box"><div class="axis">Z</div><div class="val" id="az">0.00</div></div>
     </div>
-    <div class="sub-label" style="margin-top:6px;">가속도계 (G) — 흔들기 임계: {{ cfg.SHAKE_THRESHOLD }}G</div>
+    <div class="sub-label" style="margin-top:6px;">가속도계 (G) — 흔들기 임계: {{ cfg.SHAKE_THRESHOLD }}G
+      <button class="btn btn-reset" id="btnShake" onclick="toggleShake()" style="margin-left:8px;padding:2px 9px;font-size:11px;">🌍 흔들기 감지 —</button></div>
 
     <div class="path-steps" id="pathSteps2f"></div>
     <div class="progress-bar"><div class="progress-inner" id="pathProgress2f" style="width:0%"></div></div>

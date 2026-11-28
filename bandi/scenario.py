@@ -144,7 +144,7 @@ def _run_test_path(key, gen, path):
     bolt = {"floor2": rt.bolt_2f, "rear": rt.bolt_r2, "floor1": rt.bolt_1f}[key]
     try:
         if key == "rear" and _active("floor2"):
-            _run_r2_follow(gen)
+            _run_r2_follow(gen, fallback_path=path)
             return
         _run_path(bolt, path, key, f"{label}(테스트)", move_color=(0, 200, 255), done_color=(0, 255, 0), gen=gen)
     finally:

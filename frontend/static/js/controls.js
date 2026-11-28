@@ -22,7 +22,7 @@ document.getElementById('excepts').innerHTML = Object.entries(EXCEPTIONS).map(([
   `<span class="etxt">${t}</span><span class="est"></span></button>`).join('');
 
 document.addEventListener('keydown', e => {
-  if (['INPUT', 'TEXTAREA'].includes(e.target.tagName) || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (['INPUT', 'TEXTAREA'].includes(e.target.tagName) || e.metaKey || e.ctrlKey || e.altKey || e.repeat) return;
   const m = { '1': 'fire', '2': 'quake', '3': 'black', '0': 'clear' }[e.key];
   if (m) sendDisaster(m);
 });

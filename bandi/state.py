@@ -73,6 +73,8 @@ state = {
     "aim_trim": _load_aim_trim(),
     "r2_dist_pct": _load_setting("r2_dist_pct", DEFAULT_R2_DIST_PCT, 50, 200),
     "follow_gap": _load_setting("follow_gap", FOLLOW_GAP_M, GAP_MIN_M, GAP_MAX_M),
+    # R1을 흔들면 지진 — 테스트 중 로봇을 손으로 옮기면 오발동하므로 끌 수 있게
+    "shake_detect": _load_setting("shake_detect", 1, 0, 1) >= 0.5,
     # 앱이 보낸 셀피 카메라 정면 방위 (자북 기준 시계 방향 도). quality: 1 = 폰 세움, 0 = 눕힘
     "phone": {"azimuth": None, "quality": 0.0, "accuracy": None, "ts": 0.0},
     # 나침반 자동 에임 진행 상태 (로봇별)
@@ -135,8 +137,10 @@ def raise_exception(eid: str, detail: str = ""):
 
 # R2 U턴이 실제로 옮겨 놓는 거리 — side: U턴 방향 옆으로, along: 다가온 방향으로 (앞으로 밀리면 음수)
 # 복귀할 때마다 실측해 반씩 섞고 설정 파일에 저장 (재시작해도 유지)
+# corner_slide: R2가 모서리 앞에서 멈춘 뒤 트롤리에 밀려 미끄러지는 거리 — 그만큼 일찍 멈춤
 _uturn_learned = {"side": _load_setting("uturn_side", 35.0, 0, 200),
-                  "along": _load_setting("uturn_along", -25.0, -150, 150)}
+                  "along": _load_setting("uturn_along", -25.0, -150, 150),
+                  "corner_slide": _load_setting("corner_slide", 12.0, 3, 60)}
 
 _test_running = {"on": False}
 
@@ -145,7 +149,9 @@ def _save_settings():
         data = {**state["speeds"], "r2_delay": state["r2_delay"],
                 "turn_pause": state["turn_pause"], "aim_trim": state["aim_trim"],
                 "r2_dist_pct": state["r2_dist_pct"], "follow_gap": state["follow_gap"],
-                "uturn_side": _uturn_learned["side"], "uturn_along": _uturn_learned["along"]}
+                "shake_detect": int(state["shake_detect"]),
+                "uturn_side": _uturn_learned["side"], "uturn_along": _uturn_learned["along"],
+                "corner_slide": _uturn_learned["corner_slide"]}
     try:
         with open(SPEED_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f)
