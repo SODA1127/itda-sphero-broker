@@ -2,21 +2,19 @@
 
 import argparse
 import logging
-import os
-import tempfile
 import threading
 
 from .ble import _broker_main
-from .config import FLASK_PORT
+from .config import FLASK_PORT, LOG_FILE
 from .manual import _manual_watchdog
-from .state import _state_lock, log_event, state
+from .state import _state_lock, log_event, rt, state
 from .web.server import create_app
 
 
 def _setup_logging():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
     try:    # 재시작해도 남는 로그 — 문제 진단용
-        fh = logging.FileHandler(os.path.join(tempfile.gettempdir(), "bandi_broker.log"), encoding="utf-8")
+        fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
         fh.setFormatter(logging.Formatter('%(asctime)s %(message)s'))
         fh.addFilter(lambda r: r.name != "werkzeug")     # HTTP 요청 줄은 빼고
         logging.getLogger().addHandler(fh)
@@ -34,6 +32,7 @@ def main(argv=None):
     _setup_logging()
     app = create_app()
 
+    rt.port = args.port
     with _state_lock:
         state["sim_mode"] = args.sim
 

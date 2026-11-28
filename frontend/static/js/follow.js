@@ -30,12 +30,12 @@ setInterval(() => {
       info.textContent = '대피자 움직임 감지 중';
     }
   }).catch(() => {});
-}, 500);
+}, BANDI.POLL.follow);
 
-// 프리뷰 snapshot polling (150ms) — 단순 src 교체
+// 프리뷰 snapshot polling (내부 150ms · 외부 1초) — 단순 src 교체
 setInterval(() => {
   const img = document.getElementById('followPreview');
   img.src = '/api/follow/snapshot?t=' + Date.now();
   img.style.display = 'block';
   document.getElementById('followPlaceholder').style.display = 'none';
-}, 150);
+}, BANDI.POLL.snapshot);

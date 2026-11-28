@@ -298,3 +298,21 @@ header h1 { font-size: 18px; font-weight: 700; }
 footer { padding: 0 20px 24px; color: var(--ink3); font-size: 11px; line-height: 1.75; }
 footer b { color: var(--ink2); }
 kbd { background: var(--panel2); border: 1px solid var(--bdr); border-radius: 4px; padding: 1px 5px; font-size: 10.5px; }
+
+/* 외부(Cloudflare) 접속 — 보기 전용 안내·로그인 */
+.remote-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 24px;
+              background: rgba(59, 130, 246, .12); border-bottom: 1px solid var(--blu); font-size: 13px; }
+.remote-bar[hidden] { display: none; }
+.remote-bar form { display: flex; gap: 6px; }
+.remote-bar input { padding: 5px 9px; border-radius: 6px; border: 1px solid var(--bdr); background: var(--bg);
+                    color: var(--txt); font-size: 13px; width: 180px; }
+.remote-bar.flash { animation: remoteFlash .6s ease 2; }
+#remoteErr { color: var(--red); }
+@keyframes remoteFlash { 50% { background: rgba(239, 68, 68, .25); } }
+
+/* 이벤트 로그 — 내려받기 버튼 */
+.log-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.log-head h2 { margin-bottom: 0; }
+.log-dl { display: flex; gap: 6px; }
+.log-dl .btn { padding: 4px 10px; font-size: 12px; }
+.log-head + .log-list { margin-top: 10px; }

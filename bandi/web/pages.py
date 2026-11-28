@@ -4,6 +4,7 @@ import os
 
 from flask import Blueprint, current_app, render_template
 
+from .auth import is_external
 from ..config import (
     DEFAULT_R2_DELAY_SEC,
     DEFAULT_R2_DIST_PCT,
@@ -59,7 +60,11 @@ def _static_version():
 
 @bp.route("/")
 def dashboard():
-    return render_template("index.html", cfg=_frontend_config(), aim_rows=AIM_ROWS, version=_static_version())
+    cfg = _frontend_config()
+    # 외부(Worker) 접속은 요청 수를 줄이려 갱신을 느리게 — Workers 무료 한도 하루 10만 건
+    cfg["POLL"] = ({"status": 2000, "follow": 1500, "snapshot": 1000} if is_external()
+                   else {"status": 800, "follow": 500, "snapshot": 150})
+    return render_template("index.html", cfg=cfg, aim_rows=AIM_ROWS, version=_static_version())
 
 @bp.route("/floorplan")
 def floorplan():

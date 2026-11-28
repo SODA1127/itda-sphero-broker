@@ -41,6 +41,8 @@ class _Runtime:
     last_motion_end = 0.0   # 로봇이 마지막으로 멈춘 시각 — 직후엔 흔들기를 지진으로 보지 않음
     latest_frame = None     # R2 카메라 최신 JPEG (bytes)
     frame_ts = 0.0
+    started_at = time.time()  # 브로커 시작 시각 — '이번 실행 로그' 기준
+    port = 5001               # 웹 서버 포트 (app.main이 설정) — 앱 연결 주소에 씀
 
 
 rt = _Runtime()

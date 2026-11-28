@@ -83,8 +83,7 @@ function update() {
       renderFlow(d);
       renderAim(d);
       renderSpeeds(d);
-      document.getElementById('appUrl').textContent =
-        `http://${d.server_ip}:${location.port || (location.protocol === 'https:' ? 443 : 80)}`;
+      document.getElementById('appUrl').textContent = d.app_url;
 
       // counter
       document.getElementById('triggerCount').textContent = d.trigger_count;

@@ -2,8 +2,9 @@
 
 import threading
 import time
+from datetime import datetime
 
-from flask import Blueprint, jsonify, request as flask_request
+from flask import Blueprint, Response, jsonify, request as flask_request
 
 from ..ble import _broker_main
 from ..config import (
@@ -12,6 +13,7 @@ from ..config import (
     EXCEPTIONS,
     GAP_MAX_M,
     GAP_MIN_M,
+    LOG_FILE,
     TARGET_MODES,
     _AIM_LABEL,
     _ROBOT_KEYS,
@@ -57,6 +59,7 @@ def api_status():
             "names":         state["names"],
             "connecting":    state["connecting"],
             "server_ip":     _lan_ip(),
+            "app_url":       f"http://{_lan_ip()}:{rt.port}",
             "phone":         {**state["phone"],
                               "age": round(time.time() - state["phone"]["ts"], 1) if state["phone"]["ts"] else None},
             "aim":           state["aim"],
@@ -235,6 +238,34 @@ def api_disconnect():
     _broker_stop_evt.set()   # 하트비트 루프 종료 → with 블록 탈출 → BLE 해제
     log_event("🔌 연결 해제 요청")
     return jsonify({"ok": True})
+
+@bp.route("/api/discover")
+def api_discover():
+    """R2 앱 주소 자동 찾기 — 앱이 workers.dev로 물어보면 같은 와이파이에서 쓸 브로커 주소를 알려줌"""
+    return jsonify({"ok": True, "service": "bandi", "lan_url": f"http://{_lan_ip()}:{rt.port}"})
+
+
+@bp.route("/api/logs/download")
+def api_logs_download():
+    """브로커 로그 파일 내려받기 — scope=session(이번 실행부터, 기본) | all. HTTP 요청 줄은 뺌"""
+    scope = flask_request.args.get("scope", "session")
+    since = datetime.fromtimestamp(rt.started_at).strftime("%Y-%m-%d %H:%M:%S") if scope == "session" else ""
+    out, keep = [], not since
+    try:
+        with open(LOG_FILE, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if " - - [" in line and "HTTP/1." in line:     # werkzeug 요청 줄 (색 코드 포함)
+                    continue
+                if since and line[:4].isdigit() and line[4:5] == "-":
+                    keep = line[:19] >= since      # 타임스탬프 없는 줄(오류 추적 등)은 앞 줄을 따름
+                if keep:
+                    out.append(line)
+    except OSError:
+        return jsonify({"ok": False, "error": "로그 파일이 아직 없습니다."}), 404
+    name = f"bandi_{'session' if since else 'all'}_{datetime.now():%Y%m%d-%H%M}.log"
+    return Response("".join(out), mimetype="text/plain; charset=utf-8",
+                    headers={"Content-Disposition": f"attachment; filename={name}"})
+
 
 @bp.route("/api/restart", methods=["POST"])
 def api_restart():

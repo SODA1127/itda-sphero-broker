@@ -2,6 +2,7 @@
 
 import json
 import os
+import tempfile
 
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # 저장소 루트
@@ -177,6 +178,7 @@ SHAKE_QUIET_SEC  = 3.0  # 주행·복귀가 끝나고 이 시간 동안은 흔�
 _ROBOT_KEYS = ("floor2", "rear", "floor1")
 
 FRONTEND_DIR = os.path.join(ROOT, "frontend")
+LOG_FILE = os.path.join(tempfile.gettempdir(), "bandi_broker.log")   # 재시작해도 남는 브로커 로그
 
 TEST_ROUTE_M = [(0, 1.0), (270, 1.5)]   # 테스트: R1 기준 직진 1m → 좌회전 1.5m (ㄱ자). R2는 간격만큼 뒤에서 같은 경로
 
