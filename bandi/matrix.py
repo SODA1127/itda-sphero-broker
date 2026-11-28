@@ -10,7 +10,7 @@ overlay가 있으면 overlay를, 없으면 base를 보여 준다. 비상 정지 
 
 import threading
 
-from .config import MATRIX_ANIMATIONS
+from .config import MATRIX_ANIMATIONS, MATRIX_ROTATE_DEG
 from .state import _state_lock, log_event, rt, state
 
 # ── 그림 (위쪽 = 로봇이 가는 방향, '#' = 켜짐) ─────────────────────────────
@@ -102,6 +102,8 @@ def _bolt(key):
 def _compress(shape):
     """8×8 → BOLT 64비트 프레임 (색 번호 4비트 평면 × 8줄) — spherov2 sphero_edu와 같은 방식"""
     grid = [[1 if ch == "#" else 0 for ch in row] for row in (shape or ["........"] * 8)]
+    for _ in range((MATRIX_ROTATE_DEG // 90) % 4):          # 시계 방향 90°씩
+        grid = [[grid[7 - c][r] for c in range(8)] for r in range(8)]
     out = []
     for bit in range(4):
         for r in range(7, -1, -1):
