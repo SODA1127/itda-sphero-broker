@@ -4,6 +4,7 @@ import threading
 import time
 
 from .config import SHAKE_QUIET_SEC, SHAKE_THRESHOLD, _AIM_LABEL
+from . import matrix as _mx
 from .hw import LOC_INTERVAL_MS, _is_real, _make_loc_listener, _scroll_connected, _set_led
 from .nav import _clear_trail, _reset_origin
 from .scenario import trigger_signal
@@ -148,15 +149,18 @@ def _broker_main(sim: bool):
     with ctx_2f as b2, ctx_1f as b1, ctx_r2 as br:
         rt.bolt_2f, rt.bolt_1f, rt.bolt_r2 = b2, b1, br
 
-        # wake → 초기 LED: 녹색 + 매트릭스 "Floor N" 스크롤
-        for bolt, floor, num in [(b2, "2F", "2"), (b1, "1F", "1"), (br, "R2", "2")]:
+        # wake → 매트릭스 그림 저장 → 초기 LED: 녹색 + 매트릭스 "Floor N" 스크롤 → 잠시 뒤 끔(⓪ 평소 대기)
+        for bolt, floor, num, key in [(b2, "2F", "2", "floor2"), (b1, "1F", "1", "floor1"), (br, "R2", "2", "rear")]:
             try:
                 bolt.wake()
             except Exception:
                 pass
+            if _is_real(bolt):
+                _mx.forget(bolt)
+                _mx.prepare(bolt)
             _set_led(bolt, 0, 255, 0)
             threading.Thread(
-                target=_scroll_connected, args=(bolt, num, 0, 255, 0), daemon=True
+                target=_scroll_connected, args=(bolt, num, 0, 255, 0, key), daemon=True
             ).start()
             log_event(f"💡 {floor} 매트릭스 'Floor {num}' 스크롤 시작")
 

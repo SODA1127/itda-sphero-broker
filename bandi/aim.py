@@ -4,7 +4,7 @@ import threading
 import time
 
 from .config import _AIM_LABEL
-from .hw import _set_led
+from .hw import _idle_later, _set_led
 from .nav import _reset_origin
 from .state import _state_lock, log_event, rt, state
 
@@ -76,6 +76,7 @@ def _auto_aim(key, azimuth):
         _aim_heading[key] = 0
         _reset_origin(key, bolt)
         _set_led(bolt, 0, 255, 0)
+        _idle_later(key)                     # ⓪ 완료 표시 잠깐 → 평소 대기(꺼짐)
         msg = f"완료 · 북 {north}° + 셀피 {azimuth:.0f}°" + (f" + 보정 {trim:+d}°" if trim else "")
         _set_aim_status(key, "done", msg)
         log_event(f"🧭 {label} 나침반 자동 에임 {msg} → 지금 정면 = 0°")

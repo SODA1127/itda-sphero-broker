@@ -1,10 +1,12 @@
 """로봇 입출력 — LED·매트릭스, 주행 명령, 위치 센서(locator) 읽기·좌표 변환, 시뮬레이션 자세"""
 
 import math
+import threading
 import time
 
-from .config import DRIVE_MPS, SPEED_REF, _ROBOT_KEYS
-from .state import log_event, rt, state
+from . import matrix as _mx
+from .config import DRIVE_MPS, IDLE_AFTER_SEC, SPEED_REF, _ROBOT_KEYS
+from .state import _robots_in_motion, log_event, rt, state
 
 
 def _set_led(bolt, r: int, g: int, b: int):
@@ -31,15 +33,35 @@ def _set_matrix(bolt, r: int, g: int, b: int, char: str = ""):
             bolt.set_compressed_frame_player_one_color(r, g, b)
     except Exception as e:
         log_event(f"  [Matrix 오류] {e}")
+    _mx.invalidate(bolt)
 
-def _scroll_connected(bolt, floor_num: str, r: int, g: int, b: int):
-    """연결 시 'Floor N' 스크롤 후 숫자 고정 표시 (별도 스레드에서 실행)"""
+def _quiet() -> bool:
+    """재난·주행·복귀·비상 정지가 없는 평시"""
+    return state["phase"] == "idle" and not state.get("estop") and not _robots_in_motion()
+
+def _idle(key):
+    """⓪ 평소 대기 — 앞뒤 LED·매트릭스 모두 끔"""
+    _set_led(_bolt_of(key), 0, 0, 0)
+    _mx.off(key)
+
+def _idle_later(key, sec=IDLE_AFTER_SEC):
+    """잠깐 보여 준 표시(연결·에임 완료 등)를 sec초 뒤 끔 — 그사이 재난·주행이 시작되면 그대로 둠"""
+    def _run():
+        time.sleep(sec)
+        if _quiet():
+            _idle(key)
+    threading.Thread(target=_run, daemon=True).start()
+
+def _scroll_connected(bolt, floor_num: str, r: int, g: int, b: int, key=None):
+    """연결 시 'Floor N' 스크롤 후 숫자 표시 (별도 스레드에서 실행). key를 주면 잠시 뒤 끔(⓪)"""
     text = f"Floor {floor_num}"
     for ch in text:
         _set_matrix(bolt, r, g, b, ch)
         time.sleep(0.35)
     # 스크롤 완료 → 숫자 고정
     _set_matrix(bolt, r, g, b, floor_num)
+    if key:
+        _idle_later(key)
 
 def _mps(key, speed):
     """속도 값 → 실제 m/s 추정 (R2는 거리 보정만큼 덜 감)"""

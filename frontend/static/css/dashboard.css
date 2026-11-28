@@ -208,6 +208,8 @@ header h1 { font-size: 18px; font-weight: 700; }
 .dz-clear { grid-column: 1/-1; background: transparent; font-size: 12.5px; }
 .dz-clear:hover { border-color: var(--ok); color: var(--ok); }
 .dz-test { border-style: dashed; }
+.dz-estop:hover, .dz-estop.on { border-color: var(--bad); color: var(--bad); }
+.dz-estop.on { background: rgba(248,113,113,.16); font-weight: 700; }
 .dz-test:hover { border-color: var(--blue2); color: var(--blue2); }
 
 .seg { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }

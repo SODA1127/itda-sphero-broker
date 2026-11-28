@@ -18,7 +18,8 @@ from ..config import (
     _build_2f_paths,
     _path_json,
 )
-from ..hw import _bolt_of, _pos, _set_led
+from .. import matrix as _mx
+from ..hw import _bolt_of, _halt, _idle, _pos, _set_led
 from ..manual import _tts
 from ..nav import _return_home
 from ..scenario import trigger_signal
@@ -52,6 +53,8 @@ def api_status():
             "target":        state["target"],
             "exceptions":    state["exceptions"],
             "latency":       state["latency"],
+            "estop":         state["estop"],
+            "matrix":        dict(state["matrix"]),
             "log":           state["log"][:30],
             "sim_mode":      state["sim_mode"],
             "names":         state["names"],
@@ -165,12 +168,34 @@ def api_reset():
         state["disaster"]   = None
         state["exceptions"] = {}
         state["latency"]    = None
+        state["estop"]      = False
     with _trigger_lock:
         rt.triggered = False
-    _set_led(rt.bolt_2f, 0, 255, 0)
-    _set_led(rt.bolt_1f, 0, 255, 0)
-    _set_led(rt.bolt_r2, 0, 255, 0)
+    for k in _ROBOT_KEYS:                    # ⓪ 평소 대기 — LED·매트릭스 끔
+        _idle(k)
     log_event("🔄 수동 리셋")
+    return jsonify({"ok": True})
+
+@bp.route("/api/estop", methods=["POST"])
+def api_estop():
+    """⑬ 비상 정지 — 모든 로봇 그 자리 정지, 매트릭스 빨강 전체. 복귀하지 않음 ('상황 해제'·'리셋'으로 풂)"""
+    with _trigger_lock:
+        rt.run_gen += 1                      # 주행·따라가기·복귀 스레드가 스스로 멈춤
+    with _state_lock:
+        state["estop"] = True
+    for k in _ROBOT_KEYS:
+        bolt = _bolt_of(k)
+        _halt(k, bolt, 0)
+        _set_led(bolt, 255, 0, 0)
+        _mx.redraw(k)
+    def _again():                            # 멈추는 중인 스레드가 마지막으로 그린 화면을 한 번 더 덮음
+        time.sleep(0.5)
+        if state["estop"]:
+            for k in _ROBOT_KEYS:
+                _halt(k, _bolt_of(k), 0)
+                _mx.redraw(k)
+    threading.Thread(target=_again, daemon=True).start()
+    log_event("🛑 비상 정지 — 모든 로봇 그 자리 정지 ('상황 해제'로 복귀, '리셋'으로 대기)")
     return jsonify({"ok": True})
 
 @bp.route("/api/speeds", methods=["POST"])

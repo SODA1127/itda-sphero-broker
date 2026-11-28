@@ -4,12 +4,15 @@ import math
 import threading
 import time
 
-from .config import FOLLOW_END_GAP_M, SPEED_REF, TARGET_MODES, _AIM_LABEL, _ARROW, _ROBOT_KEYS, _path_meters
+from . import matrix as _mx
+from .config import (FOLLOW_END_GAP_M, SPEED_REF, TARGET_MODES, VOICE_TURN, _AIM_LABEL, _ARROW,
+                     _ROBOT_KEYS, _path_meters)
 from .hw import (
     _angle_of,
     _bolt_of,
     _drive,
     _halt,
+    _idle,
     _is_real,
     _loc_rot,
     _mps,
@@ -25,6 +28,7 @@ from .hw import (
     _unrot,
     _vec,
 )
+from .manual import _queue_tts
 from .state import (
     _active,
     _mark_motion_end,
@@ -99,6 +103,27 @@ def _u_turn(bolt, from_heading, sign, gen):
     if bolt is not None:
         bolt.drive_control.roll_stop(int(round(from_heading + 180)) % 360)
 
+def _show_turn(state_key, bolt, move_color, turn):
+    """⑥ 돌기 전 미리 — 안내 로봇(R1·R3)은 ←/→ 초록 그림 (화재면 음성도), R2는 예전처럼 글자"""
+    if state_key == "rear":
+        _set_matrix(bolt, *move_color, _ARROW.get(turn, "^"))   # 몸체 기준: 왼쪽 < / 오른쪽 >
+        return
+    _mx.show(state_key, {90: "turn_right", 270: "turn_left"}.get(turn, _mx.guide_pattern()))
+    if state["disaster"] == "fire" and turn in VOICE_TURN and not _test_running["on"]:
+        _queue_tts(VOICE_TURN[turn])
+
+def _show_leg(state_key, bolt, move_color, moving, char):
+    """⑤ 길 안내 — 안내 로봇은 대상별 화살표. 멈춤 화면(계단·비상구)은 시나리오가 정한다"""
+    if state_key == "rear":
+        _set_matrix(bolt, *move_color, "^" if moving else char)  # 매트릭스는 몸체와 함께 돌아가므로 주행 중엔 전방 화살표
+    elif moving:
+        _mx.show(state_key, _mx.guide_pattern())
+
+def _show_done(state_key, bolt, done_color):
+    _set_led(bolt, *done_color)
+    if state_key == "rear":      # R2는 상태 표시만 — 예전처럼 층 번호
+        threading.Thread(target=_scroll_connected, args=(bolt, "2", *done_color), daemon=True).start()
+
 def _return_home_time(key, gen):
     """기록한 주행을 거꾸로 되짚어 출발점으로 돌아가 원래 방향(0°)으로 선다"""
     label = _AIM_LABEL[key]
@@ -121,7 +146,7 @@ def _return_home_time(key, gen):
               + (f", U턴 {'오른쪽' if uturn > 0 else '왼쪽'} 반원 옆걸음 보정" if uturn else "") + ")")
     try:
         for back, speed, secs, orig in legs:
-            _set_matrix(bolt, 255, 255, 255, "^")
+            _mx.show(key, "return")               # ⑰ 평시 복귀
             if bolt is not None and secs > 0:
                 bolt.drive_control.roll_start(back, speed)
             t0 = time.time()
@@ -148,7 +173,7 @@ def _return_home_time(key, gen):
             bolt.drive_control.roll_start(0, 0)
             time.sleep(1.0)
             bolt.drive_control.roll_stop(0)
-        _set_led(bolt, 0, 255, 0)
+        _idle(key)                                # ⓪ 복귀 끝 → 평소 대기(꺼짐)
         log_event(f"✅ {label} 출발점 복귀 완료")
     except Exception as e:
         log_event(f"↩ {label} 복귀 실패: {e}")
@@ -298,7 +323,7 @@ def _run_path_nav(bolt, path, state_key, label, move_color, done_color, gen=None
             _halt(state_key, bolt, prev_heading)
             if turn_pause > 0:
                 turn = (heading - prev_heading) % 360
-                _set_matrix(bolt, *move_color, _ARROW.get(turn, "^"))
+                _show_turn(state_key, bolt, move_color, turn)
                 log_event(f"  ↪ {label} {'좌' if turn == 270 else '우' if turn == 90 else ''}회전 전 {turn_pause:g}초 정지")
                 end = time.time() + turn_pause
                 while time.time() < end and not cancelled():
@@ -307,7 +332,7 @@ def _run_path_nav(bolt, path, state_key, label, move_color, done_color, gen=None
                     return finish(False)
         with _state_lock:
             state[state_key]["step"] = i + 1
-        _set_matrix(bolt, *move_color, "^" if m > 0 else char)
+        _show_leg(state_key, bolt, move_color, m > 0, char)
         if m <= 0:
             log_event(f"  → {label} 정지 (도착)  [{char}]")
             continue
@@ -342,9 +367,7 @@ def _run_path_nav(bolt, path, state_key, label, move_color, done_color, gen=None
 
     if cancelled():
         return finish(False)
-    _set_led(bolt, *done_color)
-    floor_num = "1" if state_key == "floor1" else "2"
-    threading.Thread(target=_scroll_connected, args=(bolt, floor_num, *done_color), daemon=True).start()
+    _show_done(state_key, bolt, done_color)
     finish(True)
     log_event(f"✅ {label} 경로 완료")
     return True
@@ -438,7 +461,7 @@ def _return_home_nav(key, gen):
             if cur_h is not None:
                 _halt(key, bolt, cur_h)
                 time.sleep(0.5)
-            _set_matrix(bolt, 255, 255, 255, "^")
+            _mx.show(key, "return")               # ⑰ 평시 복귀
             res = _nav_to(key, bolt, {"start": (0.0, 0.0)}, lambda st, t=tgt: t, h, speed, cancelled,
                           calib=False, hold=hold)
             cur_h = h
@@ -481,7 +504,7 @@ def _return_home_nav(key, gen):
         with _trail_lock:
             _wpts[key] = []
             _trail[key] = []
-        _set_led(bolt, 0, 255, 0)
+        _idle(key)                                # ⓪ 복귀 끝 → 평소 대기(꺼짐)
         log_event(f"✅ {label} 출발 좌표 복귀 완료" + (f" (오차 {err:.0f}cm)" if err is not None else ""))
     except Exception as e:
         log_event(f"↩ {label} 복귀 실패: {e}")
@@ -561,7 +584,7 @@ def _run_path_time(bolt, path, state_key, label, move_color, done_color, gen=Non
                     bolt.drive_control.roll_stop(prev_heading)
                 except Exception:
                     pass
-            _set_matrix(bolt, *move_color, _ARROW.get(turn, "^"))   # 몸체 기준: 왼쪽 < / 오른쪽 >
+            _show_turn(state_key, bolt, move_color, turn)
             log_event(f"  ↪ {label} {'좌' if turn == 270 else '우' if turn == 90 else ''}회전 전 {turn_pause:g}초 정지")
             end = time.time() + turn_pause
             while time.time() < end and not cancelled():
@@ -571,8 +594,7 @@ def _run_path_time(bolt, path, state_key, label, move_color, done_color, gen=Non
         with _state_lock:
             state[state_key]["step"] = i + 1
 
-        # 매트릭스는 몸체와 함께 돌아가므로 주행 중엔 항상 전방 화살표, 정지 시 지정 문자
-        _set_matrix(bolt, *move_color, "^" if duration > 0 else char)
+        _show_leg(state_key, bolt, move_color, duration > 0, char)
 
         if duration > 0:
             prev_heading = heading
@@ -607,9 +629,7 @@ def _run_path_time(bolt, path, state_key, label, move_color, done_color, gen=Non
 
     if cancelled():
         return abort()
-    _set_led(bolt, *done_color)
-    floor_num = "1" if state_key == "floor1" else "2"
-    threading.Thread(target=_scroll_connected, args=(bolt, floor_num, *done_color), daemon=True).start()
+    _show_done(state_key, bolt, done_color)
 
     with _state_lock:
         state[state_key]["moving"] = False

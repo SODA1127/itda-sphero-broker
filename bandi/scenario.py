@@ -3,7 +3,9 @@
 import threading
 import time
 
+from . import matrix as _mx
 from .config import (
+    ALARM_SEC,
     DEFAULT_SPEEDS,
     DISASTERS,
     EVAC_PATH_1F,
@@ -11,6 +13,9 @@ from .config import (
     SIGNAL_COOLDOWN,
     TARGET_MODES,
     TEST_ROUTE_M,
+    VOICE_EXIT,
+    VOICE_FIRST,
+    VOICE_STAIRS,
     _AIM_LABEL,
     _build_2f_paths,
     _build_follow_paths,
@@ -18,7 +23,8 @@ from .config import (
     _route_to_path,
 )
 from .follow import _run_r2_delayed, _run_r2_follow
-from .hw import _scroll_connected, _set_led
+from .hw import _set_led
+from .manual import _queue_tts
 from .nav import _run_path, _trail, _trail_lock
 from .state import (
     _active,
@@ -65,9 +71,13 @@ def trigger_signal(source: str = "unknown", disaster: str = None):
               f"LED {mode['led']} · 음성 {mode['voice']}")
     _set_phase("armed")
 
-    # 2F LED: 빨강 (위험 알림) → 2F 경로 실행 → 완료 후 1F 자동 출발
+    # 2F LED: 빨강 (위험 알림) + ② 경보 화면 → 2F 경로 실행 → 완료 후 1F 자동 출발. R3는 신호 받을 때까지 꺼 둠(⑮)
     _set_led(rt.bolt_2f, 255, 0, 0)
     _set_led(rt.bolt_r2, 255, 0, 0)
+    _mx.show("floor2", f"alarm_{disaster}")
+    _mx.show("rear", f"alarm_{disaster}")
+    v = VOICE_FIRST[disaster][state["target"]]       # ③ 첫 안내 음성 (지진은 흔들릴 때 문구)
+    _queue_tts(v[0] if isinstance(v, tuple) else v)
     t = threading.Thread(target=_run_2f_then_1f, args=(gen,), daemon=True)
     t.start()
 
@@ -82,10 +92,8 @@ def _reset_signal_after(seconds: float, gen: int):
         state["floor2"]["signal"] = False
     with _trigger_lock:
         rt.triggered = False
-    _set_led(rt.bolt_2f, 0, 255, 0)
-    _set_led(rt.bolt_r2, 0, 255, 0)
-    threading.Thread(target=_scroll_connected, args=(rt.bolt_2f, "2", 0, 255, 0), daemon=True).start()
-    log_event("✅ 신호 리셋 — 대기 상태 복귀")
+    # 화면은 그대로 — 쿨다운이 끝나도 유도는 계속 중 (예전엔 여기서 주행 중 R1에 'Floor 2'를 덮어씀)
+    log_event("✅ 신호 리셋 — 새 신호 받을 수 있음")
 
 def _run_2f_then_1f(gen):
     """2F 경로(R1 선두 + R2 후방 추종) 완료 → 1F 자동 출발 (연결된 쪽만 실행)"""
@@ -99,6 +107,13 @@ def _run_2f_then_1f(gen):
         if not live():
             return
         log_event(f"  진동 종료 {QUAKE_SETTLE_SEC:.0f}초 경과 → 유도 시작")
+        _queue_tts(VOICE_FIRST["quake"][state["target"]][1])
+    else:                                            # ② 화재·정전 경보 화면을 보여 준 뒤 바로 출발 (④)
+        end = rt.trigger_ts + ALARM_SEC
+        while live() and time.time() < end:
+            time.sleep(0.05)
+        if not live():
+            return
 
     r1_on = _active("floor2")
     r2_on = _active("rear")
@@ -121,6 +136,9 @@ def _run_2f_then_1f(gen):
                          move_color=(255, 80, 0), done_color=(255, 0, 0), gen=gen):
             return
         log_event("🏁 2F 계단 앞 도달 → 중계기가 R3에 출발 명령")
+        if r1_on:                                    # ⑫ 계단 앞 도착 — ↓ 초록 + 음성
+            _mx.show("floor2", "stairs")
+            _queue_tts(VOICE_STAIRS)
     else:
         log_event("ℹ️  2F 미연결 — 1F 직접 출발")
     if not live():
@@ -131,6 +149,8 @@ def _run_2f_then_1f(gen):
                          move_color=(0, 100, 255), done_color=(0, 255, 0), gen=gen):
             return
         log_event("🚪 R3 비상구 도달")
+        _mx.show("floor1", "exit")                   # ⑭ 1층 비상구 도착 — 초록 전체 + 음성
+        _queue_tts(VOICE_EXIT)
     _set_phase("complete")
 
 def _test_paths(gap):

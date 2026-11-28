@@ -19,6 +19,7 @@ from ..camera import (
     _mjpeg_clients,
     _mjpeg_clients_lock,
 )
+from .. import matrix as _mx
 from ..manual import TTS_MAX_AGE, _queue_tts, _tts
 from ..state import _state_lock, log_event, rt, state
 from .server import sock
@@ -120,8 +121,7 @@ def api_follow_direction():
             _follow["fallen_since"] = now
         elif not fallen:
             _follow["fallen_since"] = None
-        # 시야 이탈 판단
-        blind = state["target"] == "blind"
+        # 시야 이탈 판단 — ⑩ 모든 안내 대상 (로봇은 계속 감)
         speak, back = None, False
         _follow["person"] = person
         if person:
@@ -130,7 +130,7 @@ def api_follow_direction():
         elif _follow["seen"]:
             _follow["lost_since"] = _follow["lost_since"] or now
             last = _follow["lost_alert_ts"]
-            if blind and now - _follow["lost_since"] >= BLIND_LOST_SEC:
+            if now - _follow["lost_since"] >= BLIND_LOST_SEC:
                 if last is None:
                     speak = BLIND_LOST_TTS
                 elif now - last >= BLIND_REPEAT_SEC:
@@ -140,13 +140,16 @@ def api_follow_direction():
         lost_for = now - _follow["lost_since"] if _follow["lost_since"] else 0
 
     if speak == BLIND_LOST_TTS:
-        log_event(f"🦯 R2 카메라: 대피자 시야 이탈 {lost_for:.0f}초 → 폰 음성 안내")
+        log_event(f"👀 R2 카메라: 대피자 시야 이탈 {lost_for:.0f}초 → 폰 음성 안내 + R1 ↓ 노랑")
         _queue_tts(speak)
     elif speak:
         _queue_tts(speak, log=False)
-    elif back and blind:
-        log_event("🦯 R2 카메라: 대피자 다시 보임 → 경로 복귀 안내")
+    elif back:
+        log_event("👀 R2 카메라: 대피자 다시 보임 → 경로 복귀 안내")
         _queue_tts(BLIND_BACK_TTS)
+    # R1 매트릭스: 이탈 안내 중이고 R1이 유도 중이면 ↓ 사람 쪽 화살표(노랑 깜빡), 아니면 걷어 냄
+    lost_now = _follow["lost_alert_ts"] is not None
+    _mx.overlay("floor2", "person" if lost_now and state["floor2"]["moving"] else None)
 
     if fallen and not prev_fallen:
         metrics = f"w/h={aspect}" + (f", 기울기 {tilt:.0f}°" if tilt is not None else "")

@@ -23,3 +23,4 @@ function postJSON(url, body) {
     .then(() => update()).catch(console.error);
 }
 function sendDisaster(type) { postJSON('/api/disaster', { type }); }
+function sendEstop()         { postJSON('/api/estop', {}); }

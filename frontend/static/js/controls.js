@@ -62,6 +62,7 @@ function renderFlow(d) {
 
   ['fire', 'quake', 'black'].forEach(k =>
     document.getElementById('dz' + k).classList.toggle('on', d.disaster === k));
+  document.getElementById('dzestop').classList.toggle('on', !!d.estop);
   document.getElementById('triggerNote').innerHTML = dz
     ? `<b>${dz.label}</b> — ${dz.note}`
     : '평시 — 로봇 연결 상태(하트비트) 확인 중. 버튼이나 키보드 1·2·3으로 재난 상황을 발생시키세요.';

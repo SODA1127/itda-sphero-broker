@@ -23,8 +23,8 @@ setInterval(() => {
       dir.textContent = '⚠ 넘어짐'; dir.style.color = 'var(--red)';
       info.textContent = '대피자 넘어짐 감지 (3초 이상)';
     } else if (f.seen && !f.person && f.lost_secs >= 2) {
-      dir.textContent = '🦯 시야 이탈'; dir.style.color = 'var(--yel)';
-      info.textContent = `대피자 안 보임 ${f.lost_secs.toFixed(0)}초` + (f.blind ? ' — 폰 음성으로 이탈 안내 중' : ' (시각장애 모드에서만 음성 안내)');
+      dir.textContent = '👀 시야 이탈'; dir.style.color = 'var(--yel)';
+      info.textContent = `대피자 안 보임 ${f.lost_secs.toFixed(0)}초 — 폰 음성으로 이탈 안내 중 (유도 중이면 R1 ↓ 노랑)`;
     } else {
       dir.textContent = DIR_LABEL[f.direction] || f.direction; dir.style.color = '';
       info.textContent = '대피자 움직임 감지 중';

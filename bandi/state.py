@@ -58,6 +58,8 @@ state = {
     "disaster": None,           # fire / quake / black
     "target": "normal",
     "exceptions": {},           # "E4": "triggered" | "resolved"
+    "estop": False,             # ⑬ 비상 정지 — 모든 로봇 그 자리 정지, 매트릭스 빨강 전체
+    "matrix": {},               # 로봇별 지금 매트릭스 화면 이름 (bandi/matrix.py PATTERNS)
     "manual": {"on": False, "reason": "", "heading": 0, "cmd": None, "since": 0.0},   # R2 수동 조작(원격)
     "ir": "off",                # R2가 R1 IR 보는지: off | wait | ok | lost
     "latency": None,            # 트리거 → 선두 출발 (초)

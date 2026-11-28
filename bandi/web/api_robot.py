@@ -14,7 +14,7 @@ from ..aim import (
     _set_aim_status,
 )
 from ..config import TEST_ROUTE_M, _AIM_LABEL, _path_meters
-from ..hw import _set_led
+from ..hw import _idle_later, _set_led
 from ..nav import _reset_origin
 from ..scenario import _run_test_path, _test_paths
 from ..state import (
@@ -109,6 +109,7 @@ def api_aim():
             _aim_heading[key] = 0
             _reset_origin(key, bolt)
             _set_led(bolt, 0, 255, 0)
+            _idle_later(key)                 # ⓪ 완료 표시 잠깐 → 평소 대기(꺼짐)
             if state["aim"][key]["status"] == "done" and offset:
                 # 자동 에임 결과에서 손으로 더 돌린 만큼 → 다음 자동 에임에 미리 더함
                 trim = ((state["aim_trim"][key] + offset + 180) % 360) - 180

@@ -34,6 +34,7 @@
         <button class="dz quake" id="dzquake" onclick="sendDisaster('quake')"><span class="ico">🌍</span>지진<small>가속도계 감지</small></button>
         <button class="dz black" id="dzblack" onclick="sendDisaster('black')"><span class="ico">💡</span>정전<small>조도 센서 감지</small></button>
         <button class="dz dz-clear" onclick="sendDisaster('clear')">상황 해제 · 평시 복귀</button>
+        <button class="dz dz-clear dz-estop" id="dzestop" onclick="sendEstop()">🛑 비상 정지 — 모든 로봇 그 자리 정지 (복귀 안 함)</button>
         <button class="dz dz-clear dz-test" onclick="testRoute()">🧪 테스트 경로 — ㄱ자 (직진 1m → 좌회전 1.5m)</button>
       </div>
       <div class="note" id="triggerNote"></div>
