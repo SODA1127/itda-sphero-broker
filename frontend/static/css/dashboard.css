@@ -345,3 +345,6 @@ kbd { background: var(--panel2); border: 1px solid var(--bdr); border-radius: 4p
 .log-dl { display: flex; gap: 6px; }
 .log-dl .btn { padding: 4px 10px; font-size: 12px; }
 .log-head + .log-list { margin-top: 10px; }
+
+/* 2층 도면 위 대피 경로 (고른 경로는 진하게, 나머지는 옅게) */
+.fp-routes { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 4; }
