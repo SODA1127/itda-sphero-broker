@@ -11,6 +11,19 @@ from .state import _state_lock, log_event, rt, state
 
 _aim_heading = {"floor2": 0, "rear": 0, "floor1": 0}
 
+# 자동 에임 마지막 회전 — 한 번에 보내면 BOLT가 최고 속도로 확 도므로 조금씩 나눠 보냄
+AIM_TURN_STEP_DEG = 10      # 한 번에 돌리는 각도
+AIM_TURN_STEP_SEC = 0.08    # 다음 각도를 보내기까지 간격 (10° / 0.08초 ≈ 초당 125°)
+
+
+def _slow_turn(bolt, from_h, to_h):
+    """from_h → to_h로 가까운 쪽으로 조금씩 제자리 회전 (속도 0)"""
+    diff = ((to_h - from_h + 540) % 360) - 180
+    steps = max(1, int(abs(diff) // AIM_TURN_STEP_DEG) + 1)
+    for i in range(1, steps + 1):
+        bolt.drive_control.roll_start(int(round(from_h + diff * i / steps)) % 360, 0)
+        time.sleep(AIM_TURN_STEP_SEC)
+
 def _set_aim_led(bolt):
     """방향 보정용: 앞 LED 끄고 꼬리 LED만 파랗게 — 꼬리 반대쪽이 로봇 정면"""
     if bolt is None:
@@ -67,8 +80,8 @@ def _auto_aim(key, azimuth):
         target = int(round(north + azimuth + AIM_AZIMUTH_OFFSET + trim)) % 360
         _set_aim_status(key, "running", f"셀피 방위 {azimuth:.0f}°로 회전 중…")
         if bolt is not None:
-            bolt.drive_control.roll_start(target, 0)
-            time.sleep(1.5)
+            _slow_turn(bolt, 0, target)            # 지금 정면(0°)에서 목표까지 천천히
+            time.sleep(0.8)                        # 마지막 각도에 자리 잡을 때까지
             bolt.drive_control.roll_stop(target)
             time.sleep(0.5)
             if hasattr(bolt.drive_control, "reset_heading"):
