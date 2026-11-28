@@ -26,7 +26,36 @@ _follow = {
     "seen": False,          # 감지 켠 뒤 한 번이라도 보였는지 (처음부터 없으면 이탈로 안 봄)
     "lost_since": None,     # 안 보이기 시작한 시각
     "lost_alert_ts": None,  # 마지막 이탈 음성 안내 시각 (None = 안내 안 함)
+    "still_since": None,    # 대피자가 R1·R2 사이(화면 가운데)에 머물기 시작한 시각 (수납함 출동 출발 신호)
+    "still_bad_since": None,  # 왼쪽·오른쪽·안 보임이 시작된 시각 — 잠깐 튀는 감지는 봐줌
 }
+
+# 출발 신호 — 사람이 보이고 다가옴(back)·정지(stop)·멀어짐(forward) 중 하나면 R1·R2 사이에 머무는 것으로 본다.
+# 왼쪽·오른쪽(옆으로 움직이거나 화면 가장자리)·안 보임·넘어짐이 STILL_GRACE_SEC 넘게 이어지면 다시 센다
+STILL_DIRS       = ("back", "stop", "forward")
+STILL_GRACE_SEC  = 0.5     # 이보다 짧게 튀는 왼쪽·오른쪽·안 보임은 무시
+STILL_STALE_SEC  = 1.0     # 앱 감지 값이 이보다 오래되면 머묾 아님
+
+
+def _update_still(person, fallen, direction, now):
+    """_follow_lock 안에서 호출 — 감지 값마다 머묾 시작 시각 갱신"""
+    if person and not fallen and direction in STILL_DIRS:
+        _follow["still_bad_since"] = None
+        if _follow["still_since"] is None:
+            _follow["still_since"] = now
+        return
+    bad = _follow["still_bad_since"] or now
+    _follow["still_bad_since"] = bad
+    if now - bad > STILL_GRACE_SEC:
+        _follow["still_since"] = None
+
+
+def person_still_secs(now):
+    """대피자가 R1·R2 사이에 머문 지 몇 초인지 (벗어남·감지 꺼짐이면 0)"""
+    with _follow_lock:
+        if not _follow["active"] or _follow["still_since"] is None or now - _follow["last_ts"] > STILL_STALE_SEC:
+            return 0.0
+        return now - _follow["still_since"]
 
 # 시각장애 모드: R2 폰 카메라에서 앞사람이 사라지면 폰이 음성으로 경로 이탈을 알림
 BLIND_LOST_SEC    = 2.0    # 이만큼 안 보이면 이탈

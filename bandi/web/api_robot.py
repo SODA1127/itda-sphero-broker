@@ -13,7 +13,8 @@ from ..aim import (
     _set_aim_led,
     _set_aim_status,
 )
-from ..config import TEST_ROUTE_M, _AIM_LABEL, _path_meters
+from ..config import DEPLOY_STILL_SEC, TEST_ROUTE_M, _AIM_LABEL, _path_meters
+from ..deploy import run_deploy_test
 from ..hw import _set_led
 from ..nav import _reset_origin
 from ..scenario import _run_test_path, _test_paths
@@ -34,7 +35,7 @@ bp = Blueprint("api_robot", __name__)
 
 @bp.route("/api/test_route", methods=["POST"])
 def api_test_route():
-    """테스트 경로 — 연결된 로봇마다 제자리에서 직진 1m → 좌회전 1.5m. 상황 해제로 출발점 복귀"""
+    """테스트 경로 — 연결된 로봇마다 제자리에서 직진 2m → 좌회전 1.5m. 상황 해제로 출발점 복귀"""
     keys = [k for k in ("floor2", "rear", "floor1") if _active(k)]
     if not keys:
         return jsonify({"ok": False, "error": "연결된 로봇 없음"}), 400
@@ -58,6 +59,24 @@ def api_test_route():
     for k in keys:
         threading.Thread(target=_run_test_path, args=(k, gen, paths[k]), daemon=True).start()
     return jsonify({"ok": True, "robots": names})
+
+@bp.route("/api/deploy_test", methods=["POST"])
+def api_deploy_test():
+    """수납함 출동 테스트 — 수납함 칸에서 ㄱ자로 나와 R1 앞·R2 뒤 배치 → 대피자 3초 멈춤 → ㄱ자 테스트 경로"""
+    keys = [k for k in ("floor2", "rear") if _active(k)]
+    if not keys:
+        return jsonify({"ok": False, "error": "R1·R2 미연결"}), 400
+    if _robots_in_motion() or state["deploy"]["stage"]:
+        return jsonify({"ok": False, "error": "주행·복귀·출동 중 — 끝난 뒤 실행"}), 409
+    with _trigger_lock:
+        rt.run_gen += 1
+        gen = rt.run_gen
+    with _state_lock:
+        _test_running["on"] = True
+        state["deploy"] = {"stage": "deploying", "still": 0.0}
+    names = ", ".join(_AIM_LABEL[k] for k in keys)
+    threading.Thread(target=run_deploy_test, args=(gen,), daemon=True).start()
+    return jsonify({"ok": True, "robots": names, "still_sec": DEPLOY_STILL_SEC})
 
 @bp.route("/api/follow/calibrate", methods=["POST"])
 def api_follow_calibrate():

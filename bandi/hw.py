@@ -62,6 +62,8 @@ _loc_rot  = {k: None for k in _ROBOT_KEYS}                     # 위치 좌표�
 
 _sim_pose = {k: [0.0, 0.0, 0, 0, time.time()] for k in _ROBOT_KEYS}  # SIM: x, y, 헤딩, 속도, 시각
 
+_org_off  = {k: (0.0, 0.0) for k in _ROBOT_KEYS}               # 원점 리셋 뒤 '지금 자리' 좌표 (헤딩 좌표 cm) — 보통 (0, 0)
+
 def _bolt_of(key):
     return {"floor2": rt.bolt_2f, "rear": rt.bolt_r2, "floor1": rt.bolt_1f}[key]
 
@@ -143,12 +145,17 @@ def _pos(key, bolt):
     raw = _raw(key)
     if raw is None or _loc_rot[key] is None:
         return None
-    x, y = _unrot(raw[0], raw[1], _loc_rot[key])
+    return _raw_to_pos(key, raw, _loc_rot[key])
+
+def _raw_to_pos(key, raw, rot):
+    """원시 위치 → 헤딩 좌표 (축 회전·R2 거리 보정·원점 좌표 반영)"""
+    x, y = _unrot(raw[0], raw[1], rot)
     if key == "rear":
         # R2는 트롤리 때문에 바퀴가 미끄러져 위치 센서가 실제보다 많이 센다 — 'R2 거리 보정 %'만큼 줄여 실제 거리로
         k = 100.0 / state["r2_dist_pct"]
         x, y = x * k, y * k
-    return (x, y)
+    ox, oy = _org_off[key]
+    return (x + ox, y + oy)
 
 def _nav_available(key, bolt):
     return (not _is_real(bolt)) or _raw(key) is not None

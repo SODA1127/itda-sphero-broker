@@ -4,7 +4,7 @@ import math
 import threading
 import time
 
-from .config import FOLLOW_END_GAP_M, SPEED_REF, TARGET_MODES, _AIM_LABEL, _ARROW, _ROBOT_KEYS, _path_meters
+from .config import DRIVE_MPS, FOLLOW_END_GAP_M, SPEED_REF, TARGET_MODES, _AIM_LABEL, _ARROW, _ROBOT_KEYS, _path_meters
 from .hw import (
     _angle_of,
     _bolt_of,
@@ -15,14 +15,15 @@ from .hw import (
     _mps,
     _nav_available,
     _norm180,
+    _org_off,
     _pos,
     _raw,
+    _raw_to_pos,
     _scroll_connected,
     _set_led,
     _set_matrix,
     _sim_pose,
     _snap_rot,
-    _unrot,
     _vec,
 )
 from .state import (
@@ -181,6 +182,7 @@ def _reset_origin(key, bolt):
         except Exception as e:
             log_event(f"  [위치 원점 리셋 오류] {e}")
     _loc_rot[key] = None
+    _org_off[key] = (0.0, 0.0)
     _sim_pose[key][:4] = [0.0, 0.0, 0, 0]
     with _trail_lock:
         _wpts[key] = []
@@ -191,6 +193,7 @@ def _nav_to(key, bolt, ctx, target_of, heading, speed, cancelled, calib=True, ho
     target_of(start) → 목표 (헤딩 좌표 cm). 반환 'ok' | 'cancel' | 'timeout' | 'noloc'"""
     u = _vec(heading)
     calib_from, deadline = None, None
+    hist = []                                     # (시각, 구간 방향 위치) — 지금 속도 추정
     while True:
         if cancelled():
             return "cancel"
@@ -216,7 +219,7 @@ def _nav_to(key, bolt, ctx, target_of, heading, speed, cancelled, calib=True, ho
                     _loc_rot[key] = rot
                     log_event(f"  📐 {_AIM_LABEL[key]} 위치 좌표축 보정 {rot:+.0f}°")
                     if ctx.get("start") is None and ctx.get("raw0") is not None:
-                        ctx["start"] = _unrot(ctx["raw0"][0], ctx["raw0"][1], rot)
+                        ctx["start"] = _raw_to_pos(key, ctx["raw0"], rot)
                     deadline = None              # 보정용 제한 시간 → 구간 제한 시간으로 다시 계산
                     continue
                 if time.time() > deadline:
@@ -233,8 +236,15 @@ def _nav_to(key, bolt, ctx, target_of, heading, speed, cancelled, calib=True, ho
         if deadline is None:
             exp = max(along, 0) / 100 / max(_mps(key, speed), 0.05)
             deadline = time.time() + exp * NAV_TIMEOUT_FACTOR + 3.0
-        coast = _uturn_learned.get(f"coast_{key}", 0.0)    # 멈춘 뒤 미끄러지는 만큼 일찍 멈춤 (R1·R3)
+        now = time.time()
+        hist.append((now, p[0] * u[0] + p[1] * u[1]))
+        while len(hist) > 2 and now - hist[0][0] > COAST_SPEED_WIN:
+            hist.pop(0)
+        dt = hist[-1][0] - hist[0][0]
+        v = max(0.0, (hist[-1][1] - hist[0][1]) / dt) if dt >= 0.15 else 0.0    # cm/s
+        coast = _coast_cm(key, v)        # 멈춘 뒤 미끄러질 만큼 일찍 멈춤 (R1·R3) — 빠를수록 많이
         if along <= NAV_STOP_CM + coast:
+            ctx["stop"] = (p, v)
             return "ok"
         if time.time() > deadline:
             return "timeout"
@@ -249,20 +259,37 @@ REST_SETTLE_SEC = 1.0          # 멈춘 뒤 미끄러짐이 끝날 때까지 기
 COAST_LEARN_MIN_PAUSE = 0.8   # 꺾기 전 정지가 이보다 길어야 미끄러짐이 끝난 위치로 학습
 
 
-def _learn_coast(key, label, goal, pos, pause):
-    """구간 끝 목표를 멈춘 뒤 얼마나 지나쳤는지 재서 다음 정지 거리에 반영 (R1·R3)"""
+COAST_REF_CMS   = DRIVE_MPS * 100   # 학습값 coast_*는 이 속도(cm/s, 기준 속도 100)에서 멈췄을 때 미끄러지는 거리
+COAST_SPEED_WIN = 0.4               # 지금 속도를 이 시간(초) 동안의 이동으로 추정
+COAST_LEARN_MIN_V = 25.0            # 이보다 느리게 멈추면 미끄러짐이 작아 학습에 안 씀 (cm/s)
+
+
+def _coast_cm(key, v):
+    """속도 v(cm/s)로 멈출 때 미끄러질 거리 — 운동 에너지처럼 속도 제곱에 비례.
+    감속해 천천히 멈춘 구간을 빠르게 멈춘 구간만큼 일찍 세우면 못 미친다 (실측: 같은 학습값에 24cm vs 3cm)"""
+    ref = _uturn_learned.get(f"coast_{key}", 0.0)
+    return ref * min(2.0, (v / COAST_REF_CMS) ** 2) if ref else 0.0
+
+
+def _learn_coast(key, label, goal, pos, pause, stop=None):
+    """멈춘 뒤 실제로 미끄러진 거리를 그때 속도로 나눠 기준 속도 미끄러짐을 학습 (R1·R3)"""
     if key not in ("floor2", "floor1") or goal is None or pos is None or pause < COAST_LEARN_MIN_PAUSE:
         return
     (gx, gy), (ux, uy) = goal
     over = (pos[0] - gx) * ux + (pos[1] - gy) * uy        # +: 목표를 지나침, -: 못 미침
-    if abs(over) < 3:
+    if stop is None or stop[1] < COAST_LEARN_MIN_V:
+        if abs(over) >= 3:
+            log_event(f"  📏 {label} 구간 끝 목표를 {over:+.0f}cm {'지나침' if over > 0 else '못 미침'} (천천히 멈춤 — 학습 안 함)")
         return
+    (sx, sy), v = stop
+    slide = max(0.0, (pos[0] - sx) * ux + (pos[1] - sy) * uy)
+    implied = slide / (v / COAST_REF_CMS) ** 2
     name = f"coast_{key}"
     old = _uturn_learned[name]
-    _uturn_learned[name] = round(min(50.0, max(0.0, old + over / 2)), 1)
+    _uturn_learned[name] = round(min(50.0, max(0.0, (old + implied) / 2)), 1)
     _save_settings()
-    log_event(f"  📏 {label} 구간 끝 목표를 {over:+.0f}cm {'지나침' if over > 0 else '못 미침'} → "
-              f"다음엔 {_uturn_learned[name]:.0f}cm 일찍 멈춤")
+    log_event(f"  📏 {label} {v:.0f}cm/s에서 멈춰 {slide:.0f}cm 미끄러짐 (목표 {over:+.0f}cm) → "
+              f"기준 속도 미끄러짐 {_uturn_learned[name]:.0f}cm (지금 속도면 {_coast_cm(key, v):.0f}cm 일찍 멈춤)")
 
 
 def _run_path_nav(bolt, path, state_key, label, move_color, done_color, gen=None):
@@ -281,6 +308,7 @@ def _run_path_nav(bolt, path, state_key, label, move_color, done_color, gen=None
         _halt(state_key, bolt, prev_heading or 0)
         if ok and _is_real(bolt):
             time.sleep(REST_SETTLE_SEC)        # 미끄러짐이 끝난 실제 위치를 기록 (평시 복귀 지점)
+            _learn_coast(state_key, label, last_goal, _pos(state_key, bolt), REST_SETTLE_SEC, last_stop)
         mark(_pos(state_key, bolt))
         with _state_lock:
             state[state_key]["moving"] = False
@@ -310,7 +338,7 @@ def _run_path_nav(bolt, path, state_key, label, move_color, done_color, gen=None
     with _trail_lock:
         if not _wpts[state_key] and ctx["start"] is not None:
             _wpts[state_key].append(ctx["start"])
-    prev_heading, leg, last_goal = None, 0, None
+    prev_heading, leg, last_goal, last_stop = None, 0, None, None
     log_event(f"  📍 {label} 위치 기반 주행")
 
     for i, (spd, heading, dur, char) in enumerate(path):
@@ -329,7 +357,7 @@ def _run_path_nav(bolt, path, state_key, label, move_color, done_color, gen=None
                 if cancelled():
                     return finish(False)
                 if _is_real(bolt):            # 시뮬레이션 로봇은 미끄러지지 않으므로 학습 안 함
-                    _learn_coast(state_key, label, last_goal, _pos(state_key, bolt), turn_pause)
+                    _learn_coast(state_key, label, last_goal, _pos(state_key, bolt), turn_pause, last_stop)
             elif _is_real(bolt):
                 time.sleep(REST_SETTLE_SEC)
             # 꺾은 지점 = 멈춰서 미끄러짐이 끝난 위치 — 정지 명령 순간 위치는 미끄러짐만큼 앞이라 복귀 때 대각선이 됨
@@ -353,6 +381,7 @@ def _run_path_nav(bolt, path, state_key, label, move_color, done_color, gen=None
                       heading, speed, cancelled)
         if ctx.get("start") is not None:
             last_goal = ((ctx["start"][0] + offs[k][0], ctx["start"][1] + offs[k][1]), _vec(heading))
+        last_stop = ctx.pop("stop", None) if res == "ok" else None
         with _trail_lock:
             _trail[state_key].append((heading, speed, round(time.time() - t0, 2)))
         leg += 1
@@ -583,7 +612,7 @@ def _calibrate_axes(key, bolt, heading, speed, cancelled):
         if math.hypot(dx, dy) >= NAV_CALIB_CM:
             _loc_rot[key] = _snap_rot(_norm180(_angle_of(dx, dy) - heading))
             log_event(f"  📐 {_AIM_LABEL[key]} 위치 좌표축 보정 {_loc_rot[key]:+.0f}°")
-            return _unrot(raw0[0], raw0[1], _loc_rot[key])
+            return _raw_to_pos(key, raw0, _loc_rot[key])
         _drive(key, bolt, heading, speed)
         time.sleep(0.05)
     _halt(key, bolt, heading)

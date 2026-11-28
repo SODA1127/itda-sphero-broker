@@ -163,7 +163,7 @@ DISASTERS = {
 
 EXCEPTIONS = {
     "E1": "센서 오인식 — 3초 미만 조도 하강 무시",
-    "E2": "경로 이탈 — IR 2초 끊김·경로 벗어남이면 R2 수동 조작(원격) 전환",
+    "E2": "경로 이탈 — IR 끊김·경로 벗어남·R1과 1m 넘게 뒤처짐·정체면 R2 수동 조작(원격) 전환",
     "E3": "장애물 충돌 — 0.3m 후진 후 회피 재시도",
     "E4": "통신 단절 — 저장 경로로 계속 유도",
     "E5": "로봇 고장 — 예비 로봇이 역할 넘겨받아 투입",
@@ -180,6 +180,14 @@ _ROBOT_KEYS = ("floor2", "rear", "floor1")
 FRONTEND_DIR = os.path.join(ROOT, "frontend")
 LOG_FILE = os.path.join(tempfile.gettempdir(), "bandi_broker.log")   # 재시작해도 남는 브로커 로그
 
-TEST_ROUTE_M = [(0, 1.0), (270, 1.5)]   # 테스트: R1 기준 직진 1m → 좌회전 1.5m (ㄱ자). R2는 간격만큼 뒤에서 같은 경로
+TEST_ROUTE_M = [(0, 2.0), (270, 1.5)]   # 테스트: R1 기준 직진 2m → 좌회전 1.5m (ㄱ자). R2는 간격만큼 뒤에서 같은 경로
 
 _AIM_LABEL = {"floor2": "R1", "rear": "R2", "floor1": "R3"}
+
+# 수납함 출동 — 수납함 칸에서 바깥을 보고 선 R1·R2가 ㄱ자로 나와 R1 앞·R2 뒤로 한 줄 배치
+DEPLOY_OUT_M     = 0.8    # 수납함에서 곧게 나오는 거리 (R1·R2 같음)
+DEPLOY_R1_SIDE_M = 1.4    # R1이 (로봇 기준) 왼쪽으로 꺾은 뒤 가는 거리 — R2가 꺾어 뒤에 설 자리
+DEPLOY_EXTRA_GAP_M = 0.3  # 대기 때 R2는 R1 뒤 (전방–후방 간격 + 이만큼) — 대피자가 설 자리
+DEFAULT_DEPLOY_SLOT_CM = 35   # 수납함 R1 칸–R2 칸 중심 간격 (R2는 R1의 로봇 기준 오른쪽 칸)
+DEPLOY_STILL_SEC = 3.0    # 대피자가 R1·R2 사이에서 이만큼 머물면(카메라 다가옴·정지·멀어짐) 경로 안내 시작
+DEPLOY_START_TTS = "경로 안내를 시작합니다"

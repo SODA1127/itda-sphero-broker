@@ -5,11 +5,35 @@ function testRoute() {
     .then(j => {
       const note = document.getElementById('triggerNote');
       note.innerHTML = j.ok
-        ? `<b>🧪 테스트 경로</b> — ${j.robots} R1 직진 1m → 좌회전 1.5m, R2는 간격만큼 뒤에서 R1이 꺾은 곳에서 꺾음 (이벤트 로그에 구간 표시). 끝나면 '상황 해제'로 출발점 복귀`
+        ? `<b>🧪 테스트 경로</b> — ${j.robots} R1 직진 2m → 좌회전 1.5m, R2는 간격만큼 뒤에서 R1이 꺾은 곳에서 꺾음 (이벤트 로그에 구간 표시). 끝나면 '상황 해제'로 출발점 복귀`
         : '⚠ ' + j.error;
       update();
     })
     .catch(console.error);
+}
+function deployTest() {
+  fetch('/api/deploy_test', { method: 'POST' })
+    .then(r => r.json())
+    .then(j => {
+      const note = document.getElementById('triggerNote');
+      note.innerHTML = j.ok
+        ? `<b>📦 수납함 출동 테스트</b> — ${j.robots}: 0.8m 나와 왼쪽으로 꺾어 R1 앞·R2 뒤 배치 → R1·R2 사이에 ${j.still_sec}초 머물면(카메라 다가옴·정지·멀어짐) "경로 안내를 시작합니다" 후 ㄱ자 테스트 경로. 중단·복귀는 '상황 해제'`
+        : '⚠ ' + j.error;
+      update();
+    })
+    .catch(console.error);
+}
+function renderDeploy(d) {
+  const el = document.getElementById('deployNote');
+  const dp = d.deploy || {};
+  const msg = {
+    deploying: '📦 출동 배치 중 — R1·R2가 수납함에서 나와 한 줄로 서는 중',
+    waiting:   `👀 대피자 기다리는 중 — R1·R2 사이에 서 주세요 (다가옴·정지·멀어짐 ${(dp.still || 0).toFixed(1)}초 / 3초)`,
+    guiding:   '🔊 경로 안내 중 — "경로 안내를 시작합니다"',
+  }[dp.stage];
+  el.style.display = msg ? '' : 'none';
+  if (msg) el.textContent = msg;
+  document.getElementById('btnDeploy').disabled = !!dp.stage;
 }
 function setTarget(mode)    { postJSON('/api/target', { mode }); }
 function fireException(id)  { postJSON('/api/exception', { id }); }

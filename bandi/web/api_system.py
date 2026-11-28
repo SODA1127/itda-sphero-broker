@@ -70,6 +70,8 @@ def api_status():
             "aim_trim":      state["aim_trim"],
             "r2_dist_pct":   state["r2_dist_pct"],
             "follow_gap":    state["follow_gap"],
+            "deploy_slot":   state["deploy_slot"],
+            "deploy":        state["deploy"],
             "test_running":  _test_running["on"],
             "manual":        {**{k: state["manual"][k] for k in ("on", "reason", "heading", "cmd")},
                               "speed": manual_speed()},
@@ -221,6 +223,14 @@ def api_speeds():
             return jsonify({"ok": False, "error": "꺾기 정지 시간이 숫자가 아님"}), 400
         if not 0 <= pause <= 10:
             return jsonify({"ok": False, "error": "꺾기 정지 시간은 0~10초"}), 400
+    slot = state["deploy_slot"]
+    if "deploy_slot" in data:
+        try:
+            slot = round(float(data["deploy_slot"]))
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "수납함 칸 간격이 숫자가 아님"}), 400
+        if not 10 <= slot <= 150:
+            return jsonify({"ok": False, "error": "수납함 칸 간격은 10~150cm"}), 400
     delay = state["r2_delay"]
     if "r2_delay" in data:
         try:
@@ -235,10 +245,11 @@ def api_speeds():
         state["turn_pause"] = pause
         state["r2_dist_pct"] = dist_pct
         state["follow_gap"] = gap
+        state["deploy_slot"] = slot
     _save_settings()
-    log_event(f"⚙ 주행 속도 — R1 {new['floor2']} · R2 {new['rear']} (출발 {delay:g}초 지연, 거리 {dist_pct:g}%) · R3 {new['floor1']} · 꺾기 전 {pause:g}초 정지 · 간격 {gap*100:g}cm (다음 주행부터)")
+    log_event(f"⚙ 주행 속도 — R1 {new['floor2']} · R2 {new['rear']} (출발 {delay:g}초 지연, 거리 {dist_pct:g}%) · R3 {new['floor1']} · 꺾기 전 {pause:g}초 정지 · 간격 {gap*100:g}cm · 수납함 칸 간격 {slot:g}cm (다음 주행부터)")
     return jsonify({"ok": True, "speeds": new, "r2_delay": delay, "turn_pause": pause, "r2_dist_pct": dist_pct,
-                    "follow_gap": gap})
+                    "follow_gap": gap, "deploy_slot": slot})
 
 @bp.route("/api/disconnect", methods=["POST"])
 def api_disconnect():
