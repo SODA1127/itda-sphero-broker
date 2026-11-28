@@ -41,9 +41,15 @@ FOLLOW_DEADBAND_CM  = 4.0    # 경로선에서 이 안쪽으로 벗어난 건 �
 FOLLOW_TOL_CM       = 4.0    # 목표 간격까지 이만큼 남으면 멈춤
 FOLLOW_CORNER_REACH_CM = 5.0    # 모서리에서 멈춘 뒤 이보다 많이 남았으면 마저 전진하고 돎
 FOLLOW_CORNER_REACH_SEC = 4.0   # 마저 전진 제한 시간
+FOLLOW_CORNER_SETTLE_MIN = 1.0  # 모서리 정지 후 꺾기 전 정지에 더해 최소 이만큼 더 멈춤 — 트롤리 밀림이 끝난 뒤 돌게
+FOLLOW_CORNER_SETTLE_MAX = 3.0  # 아직 밀리고 있어도 이만큼 넘으면 진행
+FOLLOW_CORNER_STILL_CM  = 1.0   # 0.4초 동안 이보다 덜 움직이면 밀림이 끝난 것으로 봄
+FOLLOW_CORNER_AFTER_SEC = 0.8   # 제자리 회전 뒤 트롤리 흔들림이 멎을 때까지 기다림
 FOLLOW_MIN_SPEED_RATIO = 0.75   # 감속해도 R2 속도의 이 비율 아래로는 안 내림 — 트롤리를 끌면 저속에서 바퀴가 섬
 
-FOLLOW_STALL_SEC    = 15.0   # R1이 끝났는데 이만큼 진척이 없으면 종료
+FOLLOW_STALL_SEC    = 6.0    # 남은 거리가 있는데 이만큼 전혀 못 나가면 R1과 끊긴 것으로 보고 수동 조작
+FOLLOW_LAG_CM       = 100.0  # 따라가야 할 지점보다 이만큼 넘게 뒤처지고
+FOLLOW_LAG_SEC      = 4.0    # 그 상태가 이만큼 이어지면 R1과 끊긴 것으로 보고 수동 조작
 
 def _crumb_project(crumbs, p, idx):
     """발자국 경로에서 p와 가장 가까운 점의 경로 거리 — 뒤로는 조금만 허용"""
@@ -212,6 +218,7 @@ def _run_r2_follow(gen, fallback_path=None):
     corner_done_s = -1e9            # 이미 멈춰 돈 모서리 (다시 잡지 않게)
     ir_on = _ir_begin()
     ir_t0, ir_last, ir_poll = time.time(), None, 0.0
+    prog_s, prog_t, lag_since = 0.0, time.time(), None
     off_since = None
     _set_ir("wait" if ir_on else "off")
 
@@ -284,8 +291,22 @@ def _run_r2_follow(gen, fallback_path=None):
                 break
             time.sleep(0.05)
             continue
-        if leader_done and time.time() - last_t > FOLLOW_STALL_SEC:
-            log_event(f"⚠ {label} 진척 없음 — 따라가기 종료 (남은 {remaining:.0f}cm)")
+        # R1과 끊김 1: 따라가야 할 지점보다 크게 뒤처짐 (막힘·바퀴 헛돎·사람이 붙잡음)
+        now = time.time()
+        if r2_s > prog_s + 3:
+            prog_s, prog_t = r2_s, now
+        if remaining > FOLLOW_LAG_CM:
+            lag_since = lag_since or now
+            if now - lag_since > FOLLOW_LAG_SEC:
+                state["manual"]["heading"] = cur_h
+                _enter_manual(f"R1과 간격 벌어짐 — {remaining:.0f}cm 뒤처짐", auto=True)
+                break
+        else:
+            lag_since = None
+        # R1과 끊김 2: 남은 거리가 있는데 전혀 못 나감
+        if now - prog_t > FOLLOW_STALL_SEC:
+            state["manual"]["heading"] = cur_h
+            _enter_manual(f"R2 {FOLLOW_STALL_SEC:g}초 동안 못 나감 (남은 {remaining:.0f}cm)", auto=True)
             break
         # 모서리: R1처럼 앞에서 감속 → 멈춤 → 제자리에서 돌고 출발 (트롤리 관성으로 지나치지 않게)
         corner = _crumb_corner(crumbs, max(r2_s, corner_done_s + 20), r2_s + 40)
@@ -303,9 +324,26 @@ def _run_r2_follow(gen, fallback_path=None):
                 while time.time() < t_end and not cancelled():
                     feed()
                     time.sleep(0.05)
+                # 트롤리 밀림이 끝날 때까지 더 멈춤 — 밀리는 중에 돌면 회전하며 더 밀려 모서리를 지나침
+                t_settle = time.time()
+                hist = []
+                while not cancelled():
+                    now2 = time.time()
+                    q = _pos(key, bolt)
+                    if q is not None:
+                        hist.append((now2, q))
+                        hist = [h for h in hist if now2 - h[0] <= 0.4]
+                    waited = now2 - t_settle
+                    still = (len(hist) >= 3 and hist[-1][0] - hist[0][0] >= 0.3 and
+                             math.hypot(hist[-1][1][0] - hist[0][1][0], hist[-1][1][1] - hist[0][1][1]) < FOLLOW_CORNER_STILL_CM)
+                    if waited >= FOLLOW_CORNER_SETTLE_MAX or (waited >= FOLLOW_CORNER_SETTLE_MIN and (still or q is None)):
+                        break
+                    feed()
+                    time.sleep(0.05)
+                log_event(f"  ⏸ {label} 모서리에서 {state['turn_pause'] + time.time() - t_settle:.1f}초 멈춤 (트롤리 밀림 끝난 뒤 회전)")
                 # 멈춘 뒤 실제로 미끄러진 거리 → 다음 모서리 정지 거리에 반영
                 after_p = _pos(key, bolt)
-                if after_p is not None:
+                if after_p is not None and _is_real(bolt):      # 시뮬레이션은 미끄러지지 않으므로 학습 안 함
                     ax, ay = _crumb_point(crumbs, max(0.0, cs - 20))
                     bx, by = _crumb_point(crumbs, cs)
                     seg = math.hypot(bx - ax, by - ay) or 1.0
@@ -338,12 +376,12 @@ def _run_r2_follow(gen, fallback_path=None):
                             time.sleep(0.05)
                 cur_h = round(new_h) % 360
                 _drive(key, bolt, cur_h, 0)          # 제자리 회전
-                t_end = time.time() + 0.6
+                t_end = time.time() + 0.6 + FOLLOW_CORNER_AFTER_SEC
                 while time.time() < t_end and not cancelled():
                     feed()
                     time.sleep(0.05)
                 corner_done_s = cs
-                last_t = time.time()
+                last_t = prog_t = time.time()      # 모서리에서 멈춘 시간은 정체로 세지 않음
                 continue
             cx, cy = _crumb_point(crumbs, cs)
             cur_h = round(_angle_of(cx - p[0], cy - p[1]))

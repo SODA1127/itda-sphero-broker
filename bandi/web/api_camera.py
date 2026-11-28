@@ -16,6 +16,7 @@ from ..camera import (
     _follow_lock,
     _frame_lock,
     _jev_direction,
+    _update_still,
     _mjpeg_clients,
     _mjpeg_clients_lock,
 )
@@ -34,7 +35,8 @@ def api_follow_toggle():
         active = _follow["active"]
         if not active:
             _follow.update(fallen=False, fallen_since=None, direction="stop")
-        _follow.update(person=False, seen=False, lost_since=None, lost_alert_ts=None)
+        _follow.update(person=False, seen=False, lost_since=None, lost_alert_ts=None,
+                       still_since=None, still_bad_since=None)
     log_event(f"{'▶' if active else '⏹'} R2 카메라 감지 {'ON' if active else 'OFF'}")
     return jsonify({"ok": True, "active": active})
 
@@ -124,6 +126,7 @@ def api_follow_direction():
         # 시야 이탈 판단 — ⑩ 모든 안내 대상 (로봇은 계속 감)
         speak, back = None, False
         _follow["person"] = person
+        _update_still(person, fallen, direction, now)
         if person:
             back = _follow["lost_alert_ts"] is not None
             _follow.update(seen=True, lost_since=None, lost_alert_ts=None)

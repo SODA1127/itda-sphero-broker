@@ -42,6 +42,7 @@ const DEFAULT_R2_DELAY = BANDI.DEFAULT_R2_DELAY_SEC;
 const DEFAULT_TURN_PAUSE = BANDI.DEFAULT_TURN_PAUSE_SEC;
 const DEFAULT_R2_DIST = BANDI.DEFAULT_R2_DIST_PCT;
 const DEFAULT_GAP = BANDI.FOLLOW_GAP_M;
+const DEFAULT_SLOT = BANDI.DEFAULT_DEPLOY_SLOT_CM;
 function renderSpeeds(d) {
   if (!d.speeds) return;
   speeds = d.speeds;
@@ -57,6 +58,8 @@ function renderSpeeds(d) {
   if (!rd.dataset.touched && d.r2_dist_pct != null) rd.value = d.r2_dist_pct;
   const gp = document.getElementById('spd_gap');
   if (!gp.dataset.touched && d.follow_gap != null) gp.value = Math.round(d.follow_gap * 100);
+  const sl = document.getElementById('spd_slot');
+  if (!sl.dataset.touched && d.deploy_slot != null) sl.value = Math.round(d.deploy_slot);
 }
 function postSpeeds(body) {
   const hint = document.getElementById('speedHint');
@@ -69,10 +72,11 @@ function postSpeeds(body) {
       const tp = document.getElementById('spd_turnpause'); delete tp.dataset.touched; tp.value = j.turn_pause;
       const rd = document.getElementById('spd_r2dist'); delete rd.dataset.touched; rd.value = j.r2_dist_pct;
       const gp = document.getElementById('spd_gap'); delete gp.dataset.touched; gp.value = Math.round(j.follow_gap * 100);
+      const sl = document.getElementById('spd_slot'); delete sl.dataset.touched; sl.value = Math.round(j.deploy_slot);
       const t2 = (PATH_2F.reduce((a, p) => a + p.duration, 0) * SPEED_REF / j.speeds.floor2).toFixed(1);
       const t1 = (PATH_1F.reduce((a, p) => a + p.duration, 0) * SPEED_REF / j.speeds.floor1).toFixed(1);
       hint.style.color = '';
-      hint.textContent = `✔ 저장됨 — R1 ${j.speeds.floor2} · R2 ${j.speeds.rear} (${j.r2_delay}초 뒤 출발, 거리 ${j.r2_dist_pct}%) · R3 ${j.speeds.floor1} · 꺾기 전 ${j.turn_pause}초 정지 · 간격 ${Math.round(j.follow_gap * 100)}cm · 예상 2층 ${t2}초 / 1층 ${t1}초 (일반 모드)`;
+      hint.textContent = `✔ 저장됨 — R1 ${j.speeds.floor2} · R2 ${j.speeds.rear} (${j.r2_delay}초 뒤 출발, 거리 ${j.r2_dist_pct}%) · R3 ${j.speeds.floor1} · 꺾기 전 ${j.turn_pause}초 정지 · 간격 ${Math.round(j.follow_gap * 100)}cm · 칸 간격 ${Math.round(j.deploy_slot)}cm · 예상 2층 ${t2}초 / 1층 ${t1}초 (일반 모드)`;
       update();
     })
     .catch(e => { hint.textContent = '⚠ 요청 실패: ' + e; hint.style.color = 'var(--red)'; });
@@ -84,10 +88,11 @@ function saveSpeeds() {
   body.turn_pause = parseFloat(document.getElementById('spd_turnpause').value);
   body.r2_dist_pct = parseFloat(document.getElementById('spd_r2dist').value);
   body.follow_gap = parseFloat(document.getElementById('spd_gap').value) / 100;   // cm → m
+  body.deploy_slot = parseFloat(document.getElementById('spd_slot').value);
   postSpeeds(body);
 }
-function resetSpeeds() { postSpeeds(Object.assign({}, DEFAULT_SPEEDS, { r2_delay: DEFAULT_R2_DELAY, turn_pause: DEFAULT_TURN_PAUSE, r2_dist_pct: DEFAULT_R2_DIST, follow_gap: DEFAULT_GAP })); }
-SPEED_KEYS.concat(['r2delay', 'turnpause', 'r2dist', 'gap']).forEach(k => document.getElementById('spd_' + k)
+function resetSpeeds() { postSpeeds(Object.assign({}, DEFAULT_SPEEDS, { r2_delay: DEFAULT_R2_DELAY, turn_pause: DEFAULT_TURN_PAUSE, r2_dist_pct: DEFAULT_R2_DIST, follow_gap: DEFAULT_GAP, deploy_slot: DEFAULT_SLOT })); }
+SPEED_KEYS.concat(['r2delay', 'turnpause', 'r2dist', 'gap', 'slot']).forEach(k => document.getElementById('spd_' + k)
   .addEventListener('input', e => { e.target.dataset.touched = '1'; }));
 
 function aim(robot, action, delta) {

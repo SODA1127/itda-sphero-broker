@@ -44,9 +44,11 @@
         <button class="dz black" id="dzblack" onclick="sendDisaster('black')"><span class="ico">💡</span>정전<small>조도 센서 감지</small></button>
         <button class="dz dz-clear" onclick="sendDisaster('clear')">상황 해제 · 평시 복귀</button>
         <button class="dz dz-clear dz-estop" id="dzestop" onclick="sendEstop()">🛑 비상 정지 — 모든 로봇 그 자리 정지 (복귀 안 함)</button>
-        <button class="dz dz-clear dz-test" onclick="testRoute()">🧪 테스트 경로 — ㄱ자 (직진 1m → 좌회전 1.5m)</button>
+        <button class="dz dz-clear dz-test" onclick="testRoute()">🧪 테스트 경로 — ㄱ자 (직진 2m → 좌회전 1.5m)</button>
+        <button class="dz dz-clear dz-test" id="btnDeploy" onclick="deployTest()">📦 수납함 출동 테스트 — ㄱ자 배치 → 대피자 3초 머묾 → 경로 안내</button>
       </div>
       <div class="note" id="triggerNote"></div>
+      <div class="note" id="deployNote" style="display:none;"></div>
     </div>
     <!-- 안내 대상 모드 -->
     <div class="card">
@@ -229,10 +231,11 @@
       <div class="field"><label>꺾기 전 정지 (초)</label><input id="spd_turnpause" type="number" min="0" max="10" step="0.5"></div>
       <div class="field"><label>R2 거리 보정 (%) — 덜 가면 올림</label><input id="spd_r2dist" type="number" min="50" max="200" step="1"></div>
       <div class="field"><label>전방–후방 간격 (cm) — R1이 R2보다 앞에서 출발</label><input id="spd_gap" type="number" min="10" max="1400" step="10"></div>
+      <div class="field"><label>수납함 R1–R2 칸 간격 (cm) — 수납함 출동용</label><input id="spd_slot" type="number" min="10" max="150" step="1"></div>
     </div>
     <div class="btn-row" style="margin-top:0;">
       <button class="btn btn-connect" onclick="saveSpeeds()">💾 속도 저장</button>
-      <button class="btn btn-reset" onclick="resetSpeeds()">기본값 (100 · 150 · 100 · 0초 · 1초 · 100% · 400cm)</button>
+      <button class="btn btn-reset" onclick="resetSpeeds()">기본값 (100 · 150 · 100 · 0초 · 1초 · 100% · 400cm · 칸 35cm)</button>
     </div>
     <p class="connect-hint" id="speedHint">각 로봇은 자기 속도로 구간 시간을 계산해 정해진 거리만큼만 간다. R2가 R1보다 빠르면 간격이 줄고 느리면 벌어진다 — 간격 유지는 실제 속도를 비슷하게.</p>
   </div>

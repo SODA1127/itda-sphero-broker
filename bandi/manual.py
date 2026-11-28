@@ -62,7 +62,8 @@ _tts = {"id": 0, "text": "", "ts": 0.0}
 
 def _queue_tts(text, log=True):
     with _state_lock:
-        _tts["id"] += 1
+        # 앱은 마지막으로 읽은 id보다 큰 것만 읽음 → 브로커를 재시작해도 줄지 않게 시각(초) 기준으로 증가
+        _tts["id"] = max(_tts["id"] + 1, int(time.time()))
         _tts["text"] = text
         _tts["ts"] = time.time()
     if log:

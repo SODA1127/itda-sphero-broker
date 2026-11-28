@@ -8,6 +8,7 @@ function update() {
       testRunning = !!d.test_running;
       renderManual(d);
       renderMatrixState(d);
+      renderDeploy(d);
       // sim badge
       if (d.sim_mode) document.getElementById('simBadge').style.display = 'inline-block';
 
