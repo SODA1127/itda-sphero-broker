@@ -7,7 +7,7 @@ from .hw import _halt, _set_led, _set_matrix
 from .state import _state_lock, log_event, raise_exception, rt, state
 
 
-MANUAL_SPEED   = 70            # 수동 조작 주행 속도
+# 수동 조작 주행 속도 = 대시보드 '주행 속도'의 R2 값 (안내 대상 배율은 적용 안 함)
 
 MANUAL_TURN_DEG = 15           # A/D 한 번에 도는 각도
 
@@ -55,6 +55,9 @@ def _exit_manual():
     log_event("🎮 R2 수동 조작 해제 — 다음 주행부터 자동")
     return True
 
+def _manual_speed():
+    return max(1, min(255, int(state["speeds"]["rear"])))
+
 def _manual_watchdog():
     """W/S를 누르고 있는 동안만 달림 — 신호가 끊기면 세움"""
     while True:
@@ -64,6 +67,7 @@ def _manual_watchdog():
             with _manual_lock:
                 m["cmd"] = None
                 _halt("rear", rt.bolt_r2, m["heading"])
+            log_event(f"🎮 R2 정지 (키 뗌 · 방향 {m['heading']}°)")
 
 MANUAL_MATRIX = {
     "up":    ("^", (0, 255, 0)),
