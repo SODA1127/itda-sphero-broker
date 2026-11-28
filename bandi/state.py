@@ -24,6 +24,7 @@ from .config import (
     SPHERO_2F_NAME,
     SPHERO_R2_NAME,
     _load_aim_trim,
+    _load_route,
     _load_setting,
     _load_speeds,
 )
@@ -59,6 +60,7 @@ state = {
     "phase": "idle",            # idle → armed → guiding → handoff → complete
     "disaster": None,           # fire / quake / black
     "target": "normal",
+    "route": _load_route(),     # 2층 대피 경로 — config.ROUTES_2F (short·void·stairs)
     "exceptions": {},           # "E4": "triggered" | "resolved"
     "estop": False,             # ⑬ 비상 정지 — 모든 로봇 그 자리 정지, 매트릭스 빨강 전체
     "matrix": {},               # 로봇별 지금 매트릭스 화면 이름 (bandi/matrix.py PATTERNS)
@@ -154,6 +156,7 @@ def _save_settings():
         data = {**state["speeds"], "r2_delay": state["r2_delay"],
                 "turn_pause": state["turn_pause"], "aim_trim": state["aim_trim"],
                 "r2_dist_pct": state["r2_dist_pct"], "follow_gap": state["follow_gap"],
+                "route": state["route"],
                 "shake_detect": int(state["shake_detect"]),
                 "uturn_side": _uturn_learned["side"], "uturn_along": _uturn_learned["along"],
                 "corner_slide": _uturn_learned["corner_slide"],

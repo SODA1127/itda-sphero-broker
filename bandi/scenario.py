@@ -10,6 +10,7 @@ from .config import (
     DISASTERS,
     EVAC_PATH_1F,
     QUAKE_SETTLE_SEC,
+    ROUTES_2F,
     SIGNAL_COOLDOWN,
     TARGET_MODES,
     TEST_ROUTE_M,
@@ -117,14 +118,17 @@ def _run_2f_then_1f(gen):
 
     r1_on = _active("floor2")
     r2_on = _active("rear")
-    path_r1, path_r2 = _build_2f_paths(state["follow_gap"])
+    route = ROUTES_2F[state["route"]]
+    to_stairs = route["end"] == "stairs"             # ③만 계단에서 R3로 넘김, ①② 는 2층 출구에서 끝
+    path_r1, path_r2 = _build_2f_paths(state["follow_gap"], state["route"])
+    log_event(f"  🗺 2층 경로 {route['label']}")
     with _state_lock:
         state["floor2"]["total_steps"] = len(path_r1)
         state["rear"]["total_steps"]   = len(path_r2)
     log_event(f"  R1·R2 간격 {state['follow_gap']*100:g}cm — R1 {sum(_path_meters(path_r1)):.1f}m · R2 {sum(_path_meters(path_r2)):.1f}m")
     if not r1_on and r2_on:
         raise_exception("E5", "R1 미연결 → R2가 R1 경로를 대신 선도")
-    if not _active("floor1"):
+    if to_stairs and not _active("floor1"):
         raise_exception("E5", "R3 미연결 → 1층 인수인계 불가")
     _set_phase("guiding")
     if r2_on:
@@ -135,10 +139,21 @@ def _run_2f_then_1f(gen):
         if not _run_path(rt.bolt_2f, path_r1, "floor2", "2F",
                          move_color=(255, 80, 0), done_color=(255, 0, 0), gen=gen):
             return
+        if not to_stairs:                            # ①② 2층 출구 도착 — 초록 전체 + 비상구 음성, R3 안 넘김
+            log_event("🚪 2F 출구 도달")
+            if r1_on:
+                _mx.show("floor2", "exit")
+                _queue_tts(VOICE_EXIT)
+            _set_phase("complete")
+            return
         log_event("🏁 2F 계단 앞 도달 → 중계기가 R3에 출발 명령")
         if r1_on:                                    # ⑫ 계단 앞 도착 — ↓ 초록 + 음성
             _mx.show("floor2", "stairs")
             _queue_tts(VOICE_STAIRS)
+    elif not to_stairs:
+        log_event("ℹ️  2F 미연결 — 고른 경로는 2층 출구로 끝나 R3는 출발 안 함")
+        _set_phase("complete")
+        return
     else:
         log_event("ℹ️  2F 미연결 — 1F 직접 출발")
     if not live():

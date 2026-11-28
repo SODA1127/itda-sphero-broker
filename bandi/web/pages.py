@@ -22,6 +22,7 @@ from ..config import (
     ROOT,
     ROUTE_1F_M,
     ROUTE_2F_M,
+    ROUTES_2F,
     SHAKE_THRESHOLD,
     SPEED_REF,
     TARGET_MODES,
@@ -50,6 +51,9 @@ def _frontend_config():
         "DEFAULT_R2_DIST_PCT": DEFAULT_R2_DIST_PCT, "FOLLOW_GAP_M": FOLLOW_GAP_M,
         "ROUTE_2F_LEN_M": [m for _, m in ROUTE_2F_M], "ROUTE_1F_LEN_M": [m for _, m in ROUTE_1F_M],
         "MATRIX_PATTERNS": _mx.catalog(),
+        "ROUTES_2F": {k: {"label": v["label"], "end": v["end"],
+                          "legs": [{"heading": h, "meters": m} for h, m in v["route"]]}
+                      for k, v in ROUTES_2F.items()},
     }
 
 def _static_version():

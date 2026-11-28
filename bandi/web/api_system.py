@@ -14,6 +14,7 @@ from ..config import (
     GAP_MAX_M,
     GAP_MIN_M,
     LOG_FILE,
+    ROUTES_2F,
     TARGET_MODES,
     _AIM_LABEL,
     _ROBOT_KEYS,
@@ -29,6 +30,7 @@ from ..state import (
     _active,
     _broker_stop_evt,
     _lan_ip,
+    _robots_in_motion,
     _save_settings,
     _state_lock,
     _test_running,
@@ -73,6 +75,7 @@ def api_status():
             "aim_trim":      state["aim_trim"],
             "r2_dist_pct":   state["r2_dist_pct"],
             "follow_gap":    state["follow_gap"],
+            "route":         state["route"],
             "test_running":  _test_running["on"],
             "manual":        {**{k: state["manual"][k] for k in ("on", "reason", "heading", "cmd")},
                               "speed": manual_speed()},
@@ -81,7 +84,7 @@ def api_status():
             "positions":     {k: (lambda p: {"x": round(p[0]), "y": round(p[1])} if p else None)(_pos(k, _bolt_of(k)))
                               for k in _ROBOT_KEYS},
             "paths":         dict(zip(("floor2", "rear"),
-                                      map(_path_json, _build_2f_paths(state["follow_gap"])))),
+                                      map(_path_json, _build_2f_paths(state["follow_gap"], state["route"])))),
         })
 
 @bp.route("/api/connect", methods=["POST"])
@@ -153,6 +156,21 @@ def api_target():
     m = TARGET_MODES[mode]
     log_event(f"🎯 안내 대상 → {m['icon']} {m['label']} ({m['mps']} m/s · {m['led']}) — 다음 주행부터 적용")
     return jsonify({"ok": True})
+
+@bp.route("/api/route", methods=["POST"])
+def api_route():
+    """2층 대피 경로 고르기 — short(① 최단) · void(② 보이드 돌아) · stairs(③ 계단 → R3). 다음 주행부터, 재시작해도 유지"""
+    key = (flask_request.get_json(silent=True) or {}).get("route")
+    if key not in ROUTES_2F:
+        return jsonify({"ok": False, "error": "알 수 없는 경로"}), 400
+    if rt.triggered or _robots_in_motion():
+        return jsonify({"ok": False, "error": "재난 처리·주행 중에는 경로를 바꿀 수 없음 — '상황 해제' 뒤에"}), 409
+    with _state_lock:
+        state["route"] = key
+    _save_settings()
+    r = ROUTES_2F[key]
+    log_event(f"🗺 2층 경로 → {r['label']} ({sum(m for _, m in r['route']):.1f}m)")
+    return jsonify({"ok": True, "route": key})
 
 @bp.route("/api/exception", methods=["POST"])
 def api_exception():

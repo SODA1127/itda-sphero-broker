@@ -319,6 +319,15 @@ kbd { background: var(--panel2); border: 1px solid var(--bdr); border-radius: 4p
 .mxp-px { display: grid; grid-template-columns: repeat(8, 7px); gap: 1px; padding: 4px; background: #000; border-radius: 4px; }
 .mxp-px i { width: 7px; height: 7px; border-radius: 1px; background: #1c2230; }
 
+/* 2층 대피 경로 선택 */
+.route-seg { display: grid; grid-template-columns: 1fr; gap: 5px; }
+.route-seg button { appearance: none; border: 1px solid var(--bdr); background: var(--panel2); color: var(--ink2);
+                    border-radius: 8px; padding: 7px 10px; cursor: pointer; text-align: left; font-family: inherit;
+                    display: flex; flex-direction: column; gap: 2px; }
+.route-seg button b { font-size: 12.5px; }
+.route-seg button .spd { font-size: 10px; color: var(--ink3); }
+.route-seg button.on { border-color: var(--ok); color: var(--txt); background: rgba(52,211,153,.12); }
+
 /* 외부(Cloudflare) 접속 — 보기 전용 안내·로그인 */
 .remote-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 24px;
               background: rgba(59, 130, 246, .12); border-bottom: 1px solid var(--blu); font-size: 13px; }

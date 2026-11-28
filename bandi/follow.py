@@ -189,8 +189,8 @@ def _run_r2_follow(gen, fallback_path=None):
         p0 = _calibrate_axes(key, bolt, 0, speed, cancelled)    # 0° = R1 출발점 쪽 (경로 위)
     if p0 is None:
         log_event(f"  ⏱ {label} 위치 센서 없음 — 계획 경로로 주행")
-        # 위치 센서가 없으면 시간 기반으로 — 테스트 경로면 테스트 경로를, 아니면 2층 대피 경로를
-        path_r2 = fallback_path or _build_2f_paths(state["follow_gap"])[1]
+        # 위치 센서가 없으면 시간 기반으로 — 테스트 경로면 테스트 경로를, 아니면 고른 2층 대피 경로를
+        path_r2 = fallback_path or _build_2f_paths(state["follow_gap"], state["route"])[1]
         return _run_path_time(bolt, path_r2, key, label, (255, 180, 0), (255, 0, 0), gen)
     r1_start = _common("floor2", r1_now) if r1_now is not None else (p0[0], p0[1] + gap)
     d0 = math.hypot(r1_start[0] - p0[0], r1_start[1] - p0[1]) or gap

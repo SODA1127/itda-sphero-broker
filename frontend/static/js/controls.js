@@ -12,6 +12,33 @@ function testRoute() {
     .catch(console.error);
 }
 function setTarget(mode)    { postJSON('/api/target', { mode }); }
+
+// 2층 대피 경로 — ① 최단 · ② 보이드 돌아 · ③ 계단(R3)
+const ROUTES_2F = BANDI.ROUTES_2F;
+const ROUTE_DIR = { 0: '직진', 90: '우회전', 180: '뒤로', 270: '좌회전' };
+let routeMsg = '';
+document.getElementById('routeSeg').innerHTML = Object.entries(ROUTES_2F)
+  .sort((a, b) => a[1].label.localeCompare(b[1].label))   // ①②③ 순서 (서버가 키를 알파벳순으로 보냄)
+  .map(([k, r]) => {
+  const total = r.legs.reduce((a, l) => a + l.meters, 0);
+  const legs = r.legs.map(l => `${ROUTE_DIR[l.heading] ?? l.heading + '°'} ${l.meters.toFixed(1)}m`).join(' → ');
+  return `<button id="route_${k}" onclick="setRoute('${k}')"><b>${r.label}</b>` +
+         `<span class="spd">${legs} · 총 ${total.toFixed(1)}m</span></button>`;
+}).join('');
+function setRoute(route) {
+  fetch('/api/route', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ route }) })
+    .then(r => r.json())
+    .then(j => { routeMsg = j.ok ? '' : '⚠ ' + j.error; update(); })
+    .catch(console.error);
+}
+function renderRoute(d) {
+  Object.keys(ROUTES_2F).forEach(k =>
+    document.getElementById('route_' + k).classList.toggle('on', d.route === k));
+  const r = ROUTES_2F[d.route];
+  document.getElementById('routeNote').innerHTML = routeMsg || (r ? (r.end === 'stairs'
+    ? `<b>${r.label}</b> — 계단 앞에서 멈추고 R3가 1층 경로로 이어서 안내`
+    : `<b>${r.label}</b> — 2층 출구에서 끝 (R3는 출발 안 함)`) : '');
+}
 function fireException(id)  { postJSON('/api/exception', { id }); }
 
 document.getElementById('seg').innerHTML = Object.entries(TARGET_MODES).map(([k, m]) =>
@@ -69,6 +96,7 @@ function renderFlow(d) {
 
   Object.keys(TARGET_MODES).forEach(k =>
     document.getElementById('seg_' + k).classList.toggle('on', d.target === k));
+  renderRoute(d);
   document.getElementById('targetNote').innerHTML =
     `<b>${tm.label}</b> — ${tm.led}, ${tm.mps} m/s. 음성: ${tm.voice}. ` +
     `Sphero 속도 ×${tm.mps}, 구간 시간 ÷${tm.mps}로 같은 거리 유지 (다음 주행부터 적용).`;

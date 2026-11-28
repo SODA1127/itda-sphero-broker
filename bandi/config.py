@@ -44,12 +44,26 @@ FOLLOW_GAP_M   = 4.0   # R1(전방)–R2(후방) 간격 기본값 — 대시보�
 
 FOLLOW_END_GAP_M = 1.0 # 도착 때 R2가 R1 뒤에 남기는 간격 — R2는 출발 4m 차이를 따라잡아 R1 바로 뒤까지 간다
 
-# 2층 (현재 시연용): 중앙 복도 모서리(보이드 아래) 출발 → 직진 → 좌회전 → 계단(EXIT). 모든 재난 유형 공통
-# 도면 전체 경로로 되돌릴 때: (0,0.9) (270,5.7) (0,5.7) (270,9.0) + 대시보드 ROUTE_2F 꺾임점 5개
-ROUTE_2F_M = [
-    (0,   5.7),        # ③ 19칸 — 직진 (중앙 복도)
-    (270, 9.0),        # ④ 30칸 — 좌회전, 계단 앞 핸드오프
-]
+# 2층 대피 경로 3개 — 대시보드에서 고름. 셋 다 R1 출발점(오른쪽 계단 위 FH 앞, 정면 = 0°)에서 시작하는 R1 경로.
+# R2는 R1 뒤 간격(4m)만큼 첫 구간을 거꾸로 늘인 곳에서 출발해 R1이 간 길을 따라감 (_full_route).
+# 현장에서 R1을 속도 100으로 몰아 잰 이동 시간(초)을 m로 바꾼 값: 빨강 첫 구간 29초 = 47칸(14.1m) 실측 → 1초 ≈ 0.486m.
+# end: "exit" = 2층 출구에서 끝(R3 안 넘김), "stairs" = 계단 앞에서 R3에 1층 경로를 넘김
+_SEC_TO_M = 14.1 / 29
+def _sec_route(*legs):
+    return [(h, round(sec * _SEC_TO_M, 2)) for h, sec in legs]
+
+ROUTES_2F = {
+    "short":  {"label": "① 최단 — 2층 출구", "end": "exit",            # 보라
+               "route": _sec_route((0, 6.5), (270, 15), (0, 10), (270, 15))},
+    "void":   {"label": "② 보이드 돌아 — 2층 출구", "end": "exit",      # 빨강
+               "route": _sec_route((0, 29), (270, 15), (180, 10.5), (270, 15))},
+    "stairs": {"label": "③ 계단 — 1층(R3) 인수인계", "end": "stairs",   # 초록
+               "route": _sec_route((0, 7), (270, 5))},
+}
+
+DEFAULT_ROUTE = "stairs"   # 예전 2층 경로처럼 계단에서 R3로 넘김
+
+ROUTE_2F_M = ROUTES_2F[DEFAULT_ROUTE]["route"]     # 기본 경로 (대시보드 도면 표시용)
 
 ROUTE_1F_M = [         # 1층: 137호 옆 계단(출발) → 로비 → 주출입구(EXIT)
     (0,   7.5),        # ① 25칸
@@ -57,6 +71,18 @@ ROUTE_1F_M = [         # 1층: 137호 옆 계단(출발) → 로비 → 주출�
 ]
 
 _ARROW = {0: "^", 90: ">", 180: "v", 270: "<"}
+
+def _route_len(key):
+    return sum(m for _, m in ROUTES_2F[key]["route"])
+
+def _full_route(key, gap):
+    """R2 출발점 기준 전체 경로 — R1 경로 앞에 R2→R1 간격(첫 구간 방향 일직선)을 붙임"""
+    legs = ROUTES_2F[key]["route"]
+    h0, m0 = legs[0]
+    if h0 == 0:
+        return [(0, round(gap + m0, 2))] + legs[1:]
+    return [(0, gap)] + legs
+
 
 def _slice_route(route, start_m, end_m):
     """경로 중 start_m ~ end_m 구간만 (헤딩, m) 목록으로 잘라 낸다 (꺾이는 지점은 그대로)"""
@@ -90,9 +116,9 @@ def _build_follow_paths(route, gap):
     r2 = _route_to_path(_slice_route(route, 0, length - end_gap), "v", DEFAULT_SPEEDS["rear"])
     return r1, r2
 
-def _build_2f_paths(gap):
-    """간격(m)에 맞춘 2층 R1·R2 주행 단계"""
-    return _build_follow_paths(ROUTE_2F_M, gap)
+def _build_2f_paths(gap, key=DEFAULT_ROUTE):
+    """간격(m)에 맞춘 2층 R1·R2 주행 단계 — R1은 FH 앞에서 고른 경로 전체, R2는 간격만큼 뒤에서 같은 길"""
+    return _build_follow_paths(_full_route(key, gap), gap)
 
 def _path_json(path):
     return [{"step": i + 1, "char": ch, "speed": spd, "heading": hdg, "duration": dur,
@@ -101,7 +127,7 @@ def _path_json(path):
 
 GAP_MIN_M = 0.1                            # 10cm — 짧은 테스트용
 
-GAP_MAX_M = round(ROUTE_2F_LEN - 0.5, 1)   # R1이 최소 0.5m는 가야 함
+GAP_MAX_M = 14.0                           # R2는 R1 뒤 위쪽 복도 일직선 위 — 이보다 멀리 둘 일 없음
 
 EVAC_PATH_2F, EVAC_PATH_R2 = _build_2f_paths(FOLLOW_GAP_M)
 
@@ -133,6 +159,17 @@ def _load_aim_trim():
     except (OSError, ValueError, AttributeError):
         pass
     return trim
+
+def _load_route():
+    """마지막으로 고른 2층 경로 — 재시작해도 유지"""
+    try:
+        with open(SPEED_FILE, encoding="utf-8") as f:
+            v = json.load(f).get("route")
+        if v in ROUTES_2F:
+            return v
+    except (OSError, ValueError, AttributeError):
+        pass
+    return DEFAULT_ROUTE
 
 def _load_setting(key, default, lo, hi):
     try:
