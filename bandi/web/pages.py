@@ -25,6 +25,7 @@ from ..config import (
     ROUTE_2F_M,
     ROUTES_2F,
     SHAKE_THRESHOLD,
+    SPHERO_NAMES,
     SPEED_REF,
     TARGET_MODES,
 )
@@ -53,6 +54,7 @@ def _frontend_config():
         "DEFAULT_DEPLOY_SLOT_CM": DEFAULT_DEPLOY_SLOT_CM,
         "ROUTE_2F_LEN_M": [m for _, m in ROUTE_2F_M], "ROUTE_1F_LEN_M": [m for _, m in ROUTE_1F_M],
         "MATRIX_PATTERNS": _mx.catalog(),
+        "SPHERO_NAMES": SPHERO_NAMES,
         "ROUTES_2F": {k: {"label": v["label"], "end": v["end"],
                           "legs": [{"heading": h, "meters": m} for h, m in v["route"]]}
                       for k, v in ROUTES_2F.items()},

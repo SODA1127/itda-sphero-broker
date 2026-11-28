@@ -202,22 +202,22 @@
     <div class="input-row">
       <div class="field">
         <label>2층 Sphero 이름 (R1 선두)</label>
-        <input id="inp2f" type="text" placeholder="SB-XXXX" autocomplete="off" spellcheck="false">
+        <select id="inp2f"></select>
       </div>
       <div class="field">
         <label>1층 Sphero 이름 (R3 대기)</label>
-        <input id="inp1f" type="text" placeholder="SB-YYYY" autocomplete="off" spellcheck="false">
+        <select id="inp1f"></select>
       </div>
       <div class="field">
         <label>2층 후방 Sphero 이름 (R2 트롤리)</label>
-        <input id="inpR2" type="text" placeholder="SB-ZZZZ" autocomplete="off" spellcheck="false">
+        <select id="inpR2"></select>
       </div>
     </div>
     <div class="btn-row">
       <button class="btn btn-connect" id="btnConnect" onclick="connectSphero()">🔌 연결 시작</button>
       <button class="btn btn-disconnect" id="btnDisconnect" onclick="disconnectSphero()">⏏ 연결 해제</button>
     </div>
-    <p class="connect-hint" id="connectHint">Sphero Edu 앱에서 각 볼트의 이름을 확인 후 입력하세요.</p>
+    <p class="connect-hint" id="connectHint">로봇마다 볼트 이름을 고르세요 (안 쓰는 칸은 '연결 안 함'). 이름은 Sphero Edu 앱에서 확인할 수 있어요.</p>
   </div>
 
   <!-- 주행 속도 -->

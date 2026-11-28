@@ -37,7 +37,7 @@ function connectSphero() {
   const btn  = document.getElementById('btnConnect');
 
   if (!n2f && !n1f && !nR2) {
-    hint.textContent = '⚠ 이름을 최소 하나 입력하세요.';
+    hint.textContent = '⚠ 연결할 볼트를 최소 하나 고르세요.';
     hint.style.color = 'var(--red)';
     return;
   }

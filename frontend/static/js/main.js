@@ -97,10 +97,10 @@ function update() {
       // connect form: 현재 이름 채우기 (한 번만)
       const inp2f = document.getElementById('inp2f');
       const inp1f = document.getElementById('inp1f');
-      if (!inp2f.dataset.touched) inp2f.value = d.names?.floor2 || '';
-      if (!inp1f.dataset.touched) inp1f.value = d.names?.floor1 || '';
       const inpR2 = document.getElementById('inpR2');
-      if (!inpR2.dataset.touched) inpR2.value = d.names?.rear || '';
+      if (!inp2f.dataset.touched) setSpheroName(inp2f, d.names?.floor2);
+      if (!inp1f.dataset.touched) setSpheroName(inp1f, d.names?.floor1);
+      if (!inpR2.dataset.touched) setSpheroName(inpR2, d.names?.rear);
       inp2f.className = d.floor2.connected ? 'ok' : '';
       inp1f.className = d.floor1.connected ? 'ok' : '';
       inpR2.className = d.rear.connected ? 'ok' : '';
@@ -121,10 +121,17 @@ function update() {
     .catch(console.error);
 }
 
+// 연결 설정 — 볼트 이름 드롭다운 (config.SPHERO_NAMES + '연결 안 함')
+function setSpheroName(sel, name) {
+  name = name || '';
+  if (name && ![...sel.options].some(o => o.value === name)) sel.add(new Option(name, name));   // 목록에 없는 저장값도 유지
+  sel.value = name;
+}
 ['inp2f','inp1f','inpR2'].forEach(id => {
-  document.getElementById(id).addEventListener('input', e => {
-    e.target.dataset.touched = '1';
-  });
+  const sel = document.getElementById(id);
+  sel.add(new Option('— 연결 안 함 —', ''));
+  (BANDI.SPHERO_NAMES || []).forEach(n => sel.add(new Option(n, n)));
+  sel.addEventListener('change', e => { e.target.dataset.touched = '1'; });
 });
 
 // R1 흔들기 지진 감지 — 테스트 중에는 꺼 두면 로봇을 손으로 옮겨도 지진이 발동하지 않음

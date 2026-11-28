@@ -348,3 +348,9 @@ kbd { background: var(--panel2); border: 1px solid var(--bdr); border-radius: 4p
 
 /* 2층 도면 위 대피 경로 (고른 경로는 진하게, 나머지는 옅게) */
 .fp-routes { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 4; }
+
+/* 연결 설정 — 볼트 이름 드롭다운 (입력칸과 같은 모양) */
+.field select { width: 100%; background: #0f1117; border: 1px solid var(--bdr); border-radius: 8px;
+                padding: 10px 12px; color: var(--txt); font: 15px/1 'JetBrains Mono', monospace; outline: none; cursor: pointer; }
+.field select:focus { border-color: var(--blu); }
+.field select.ok    { border-color: var(--grn); }

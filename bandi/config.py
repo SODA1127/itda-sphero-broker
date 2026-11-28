@@ -13,6 +13,8 @@ SPHERO_1F_NAME  = "SB-D721"   # 1층 Sphero BLE 이름 (R3 대기)
 
 SPHERO_R2_NAME  = "SB-3601"   # 2층 후방 Sphero BLE 이름 (R2, 스마트폰 트롤리)
 
+SPHERO_NAMES    = ["SB-25D4", "SB-3601", "SB-9BDE", "SB-D721"]   # 대시보드 연결 설정 드롭다운에 나오는 볼트 이름
+
 FLASK_PORT      = 5001
 
 FLOORPLAN_PDF   = os.path.join(ROOT, "팔달관_도면.pdf")
