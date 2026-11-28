@@ -5,7 +5,7 @@ import threading
 import time
 
 from . import matrix as _mx
-from .config import (FOLLOW_END_GAP_M, SPEED_REF, TARGET_MODES, VOICE_TURN, _AIM_LABEL, _ARROW,
+from .config import (FOLLOW_END_GAP_M, SPEED_REF, TARGET_MODES, VOICE_TURN, _AIM_LABEL,
                      _ROBOT_KEYS, _path_meters)
 from .hw import (
     _angle_of,
@@ -104,11 +104,9 @@ def _u_turn(bolt, from_heading, sign, gen):
         bolt.drive_control.roll_stop(int(round(from_heading + 180)) % 360)
 
 def _show_turn(state_key, bolt, move_color, turn):
-    """⑥ 돌기 전 미리 — 안내 로봇(R1·R3)은 ←/→ 초록 그림 (화재면 음성도), R2는 예전처럼 글자"""
+    """⑥ 방향 바꿀 때 — LED는 바꾸지 않음(팀 결정 11/28, 직진 화살표 그대로). 화재면 안내 로봇이 돌 때 음성만"""
     if state_key == "rear":
-        _set_matrix(bolt, *move_color, _ARROW.get(turn, "^"))   # 몸체 기준: 왼쪽 < / 오른쪽 >
         return
-    _mx.show(state_key, {90: "turn_right", 270: "turn_left"}.get(turn, _mx.guide_pattern()))
     if state["disaster"] == "fire" and turn in VOICE_TURN and not _test_running["on"]:
         _queue_tts(VOICE_TURN[turn])
 
