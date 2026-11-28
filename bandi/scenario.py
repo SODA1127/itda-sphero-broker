@@ -24,7 +24,7 @@ from .config import (
     _route_to_path,
 )
 from .follow import _run_r2_delayed, _run_r2_follow
-from .hw import _set_led
+from .hw import _drive, _halt, _set_led
 from .manual import _queue_tts
 from .nav import _run_path, _trail, _trail_lock
 from .state import (
@@ -96,6 +96,8 @@ def _reset_signal_after(seconds: float, gen: int):
     # 화면은 그대로 — 쿨다운이 끝나도 유도는 계속 중 (예전엔 여기서 주행 중 R1에 'Floor 2'를 덮어씀)
     log_event("✅ 신호 리셋 — 새 신호 받을 수 있음")
 
+END_TURN_SEC = 1.5   # 경로 끝 제자리 회전에 주는 시간 (BOLT가 돌고 멈출 때까지)
+
 def _run_2f_then_1f(gen):
     """2F 경로(R1 선두 + R2 후방 추종) 완료 → 1F 자동 출발 (연결된 쪽만 실행)"""
     def live():
@@ -139,6 +141,22 @@ def _run_2f_then_1f(gen):
         if not _run_path(rt.bolt_2f, path_r1, "floor2", "2F",
                          move_color=(255, 80, 0), done_color=(255, 0, 0), gen=gen):
             return
+        if r1_on and route.get("end_heading") is not None:   # 경로 끝: 정한 방향을 보게 제자리 회전 → 조금 전진 (③: 180° · 0.3m)
+            last_h, new_h = route["route"][-1][0], route["end_heading"] % 360
+            log_event(f"  ↻ R1 경로 끝 제자리 회전 {last_h}° → {new_h}°")
+            _drive("floor2", rt.bolt_2f, new_h, 0)
+            end = time.time() + END_TURN_SEC
+            while live() and time.time() < end:
+                time.sleep(0.05)
+            _halt("floor2", rt.bolt_2f, new_h)
+            if not live():
+                return
+            fwd = route.get("end_forward_m") or 0
+            if fwd > 0:
+                log_event(f"  → R1 {new_h}° 방향으로 {fwd:g}m 전진")
+                if not _run_path(rt.bolt_2f, _route_to_path([(new_h, fwd)], "v", DEFAULT_SPEEDS["floor2"]),
+                                 "floor2", "2F(끝)", move_color=(255, 80, 0), done_color=(255, 0, 0), gen=gen):
+                    return
         if not to_stairs:                            # ①② 2층 출구 도착 — 초록 전체 + 비상구 음성, R3 안 넘김
             log_event("🚪 2F 출구 도달")
             if r1_on:

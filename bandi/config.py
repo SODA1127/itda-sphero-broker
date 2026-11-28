@@ -61,7 +61,8 @@ ROUTES_2F = {
                "route": [(0, 16.5), (270, 10.0), (180, 7.0)] + _sec_route((270, 15))},
     "stairs": {"label": "③ 계단 — 1층(R3) 인수인계", "end": "stairs",   # 초록
                # 1구간 1m는 현장 실측 (11/28), 2구간은 잰 시간 환산
-               "route": [(0, 1.0)] + _sec_route((270, 5))},
+               "route": [(0, 1.0)] + _sec_route((270, 5)),
+               "end_heading": 180, "end_forward_m": 0.3},         # 끝난 뒤 R1이 제자리에서 180°를 보게 돌고 0.3m 전진 (11/28)
 }
 
 DEFAULT_ROUTE = "short"    # ① 최단 — 2층 출구
