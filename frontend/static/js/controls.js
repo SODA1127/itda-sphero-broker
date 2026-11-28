@@ -16,9 +16,9 @@ function deployTest() {
     .then(r => r.json())
     .then(j => {
       const note = document.getElementById('triggerNote');
-      note.innerHTML = j.ok
+      note.innerHTML = !j.ok ? '⚠ ' + j.error : j.then_test
         ? `<b>📦 수납함 출동 테스트</b> — ${j.robots}: 0.8m 나와 왼쪽으로 꺾어 R1 앞·R2 뒤 배치 → R1·R2 사이에 ${j.still_sec}초 머물면(카메라 다가옴·정지·멀어짐) "경로 안내를 시작합니다" 후 ㄱ자 테스트 경로. 중단·복귀는 '상황 해제'`
-        : '⚠ ' + j.error;
+        : `<b>📦 수납함 출동</b> — ${j.robots}: 0.8m 나와 왼쪽으로 꺾어 R1 앞·R2 뒤 배치만 하고 멈춤. 배치가 끝나면 재난 트리거(화재·지진·정전)로 고른 2층 경로 시험. 수납함 앞으로 복귀는 '상황 해제'`;
       update();
     })
     .catch(console.error);

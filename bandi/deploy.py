@@ -17,8 +17,11 @@ from .config import (
     DEPLOY_EXTRA_GAP_M,
     DEPLOY_OUT_M,
     DEPLOY_R1_SIDE_M,
+    DEPLOY_R2_SIDE_M,
     DEPLOY_START_TTS,
     DEPLOY_STILL_SEC,
+    DEPLOY_THEN_TEST,
+    DEPLOY_TURN_WAIT_SEC,
     TARGET_MODES,
     _ARROW,
     _route_to_path,
@@ -43,14 +46,20 @@ def _set_stage(stage, still=0.0):
         state["deploy"] = {"stage": stage, "still": round(still, 1)}
 
 
-def _r1_path():
-    return _route_to_path([(0, DEPLOY_OUT_M), (DEPLOY_LEFT, DEPLOY_R1_SIDE_M)], "v", DEFAULT_SPEEDS["floor2"])
+def _r1_side_m(slot_cm, gap_cm):
+    """R1이 꺾은 뒤 갈 거리 — R2가 (칸 간격만큼 옆에서) 꺾어 R1 뒤 간격에 서려면 R1이 그만큼 멀리 있어야 함.
+    예) 간격 4m+0.3m, 칸 35cm → R1 4.4m (R2는 0.45m 가서 섬). 간격이 작으면 기본 1.4m"""
+    return round(max(DEPLOY_R1_SIDE_M, (gap_cm - slot_cm) / 100 + DEPLOY_R2_SIDE_M), 2)
 
 
-def _deploy_r2(gen, slot_cm, gap_cm, r1_on, out):
+def _r1_path(side_m):
+    return _route_to_path([(0, DEPLOY_OUT_M), (DEPLOY_LEFT, side_m)], "v", DEFAULT_SPEEDS["floor2"])
+
+
+def _deploy_r2(gen, slot_cm, gap_cm, r1_on, out, side_m):
     """R2: 0.8m 직진 → 왼쪽으로 꺾어 R1 뒤 간격까지. 반환 True = 배치 완료"""
     key, bolt, label = "rear", rt.bolt_r2, "R2(출동)"
-    out_cm, side_cm = DEPLOY_OUT_M * 100, DEPLOY_R1_SIDE_M * 100
+    out_cm, side_cm = DEPLOY_OUT_M * 100, side_m * 100
 
     def cancelled():
         return gen != rt.run_gen
@@ -102,13 +111,12 @@ def _deploy_r2(gen, slot_cm, gap_cm, r1_on, out):
     if res == "timeout":
         log_event(f"⚠ {label} {DEPLOY_OUT_M:g}m 구간 시간 초과 — 다음 구간으로")
 
-    # 꺾기 전 정지 (ㄱ자 테스트와 같게)
+    # 꺾기 전 정지 — 멈춰 미끄러짐이 끝난 뒤 DEPLOY_TURN_WAIT_SEC 더 기다렸다 꺾음
     _halt(key, bolt, 0)
-    pause = state["turn_pause"]
+    pause = DEPLOY_TURN_WAIT_SEC + (REST_SETTLE_SEC if _is_real(bolt) else 0)
     _set_matrix(bolt, *DEPLOY_COLOR, _ARROW[DEPLOY_LEFT])
-    if pause > 0:
-        log_event(f"  ↪ {label} 좌회전 전 {pause:g}초 정지")
-    end = time.time() + max(pause, REST_SETTLE_SEC if _is_real(bolt) else 0)
+    log_event(f"  ↪ {label} 좌회전 전 {pause:g}초 정지 (멈춘 뒤 {DEPLOY_TURN_WAIT_SEC:g}초)")
+    end = time.time() + pause
     while time.time() < end and not cancelled():
         time.sleep(0.05)
     if cancelled():
@@ -188,18 +196,21 @@ def _deploy(gen):
     slot, follow_gap = state["deploy_slot"], state["follow_gap"] * 100
     gap = follow_gap + DEPLOY_EXTRA_GAP_M * 100          # 대기 때 R1–R2 거리 (대피자가 설 자리)
     _set_stage("deploying")
-    log_event(f"📦 수납함 출동 — R1 직진 {DEPLOY_OUT_M:g}m → 좌회전 {DEPLOY_R1_SIDE_M:g}m · "
+    side_m = _r1_side_m(slot, gap)                      # 간격이 크면 R1이 더 멀리 나가야 R2가 뒤에 설 수 있음
+    log_event(f"📦 수납함 출동 — R1 직진 {DEPLOY_OUT_M:g}m → 좌회전 {side_m:g}m · "
               f"R2 직진 {DEPLOY_OUT_M:g}m → 좌회전 R1 뒤 {gap:g}cm (간격 {follow_gap:g} + {DEPLOY_EXTRA_GAP_M * 100:g}cm, "
               f"칸 간격 {slot:g}cm)")
     result = {}
 
     def run_r1():
-        result["floor2"] = _run_path(rt.bolt_2f, _r1_path(), "floor2", "R1(출동)",
+        # 나와서 멈추고 미끄러짐이 끝난 뒤 1초 더 기다렸다 꺾음 (실제 로봇만 미끄러짐 대기)
+        wait = DEPLOY_TURN_WAIT_SEC + (REST_SETTLE_SEC if _is_real(rt.bolt_2f) else 0)
+        result["floor2"] = _run_path(rt.bolt_2f, _r1_path(side_m), "floor2", "R1(출동)", turn_pause=wait,
                                      move_color=DEPLOY_COLOR, done_color=DEPLOY_COLOR, gen=gen)
 
     def run_r2():
         try:
-            result["rear"] = _deploy_r2(gen, slot, gap, r1_on, result)
+            result["rear"] = _deploy_r2(gen, slot, gap, r1_on, result, side_m)
         except Exception as e:
             log_event(f"⚠ R2(출동) 오류: {e}")
             result["rear"] = False
@@ -276,6 +287,9 @@ def run_deploy_test(gen):
         if not _deploy(gen):
             if gen == rt.run_gen:
                 log_event("⚠ 수납함 출동 배치 실패 — '상황 해제'로 수납함 앞 출발점 복귀")
+            return
+        if not DEPLOY_THEN_TEST:                            # 출동만 — 다음은 재난 트리거로
+            log_event("📦 출동 완료 — 이 자리에서 재난 트리거(화재·지진·정전)를 누르면 고른 2층 경로로 출발")
             return
         if not _wait_person(gen):
             return

@@ -13,7 +13,7 @@ from ..aim import (
     _set_aim_led,
     _set_aim_status,
 )
-from ..config import DEPLOY_STILL_SEC, TEST_ROUTE_M, _AIM_LABEL, _path_meters
+from ..config import DEPLOY_STILL_SEC, DEPLOY_THEN_TEST, TEST_ROUTE_M, _AIM_LABEL, _path_meters
 from ..deploy import run_deploy_test
 from ..hw import _idle_later, _set_led
 from ..nav import _reset_origin
@@ -62,7 +62,7 @@ def api_test_route():
 
 @bp.route("/api/deploy_test", methods=["POST"])
 def api_deploy_test():
-    """수납함 출동 테스트 — 수납함 칸에서 ㄱ자로 나와 R1 앞·R2 뒤 배치 → 대피자 3초 멈춤 → ㄱ자 테스트 경로"""
+    """수납함 출동 — 수납함 칸에서 ㄱ자로 나와 R1 앞·R2 뒤 배치. DEPLOY_THEN_TEST면 이어서 대피자 확인 → ㄱ자 테스트 경로"""
     keys = [k for k in ("floor2", "rear") if _active(k)]
     if not keys:
         return jsonify({"ok": False, "error": "R1·R2 미연결"}), 400
@@ -76,7 +76,7 @@ def api_deploy_test():
         state["deploy"] = {"stage": "deploying", "still": 0.0}
     names = ", ".join(_AIM_LABEL[k] for k in keys)
     threading.Thread(target=run_deploy_test, args=(gen,), daemon=True).start()
-    return jsonify({"ok": True, "robots": names, "still_sec": DEPLOY_STILL_SEC})
+    return jsonify({"ok": True, "robots": names, "still_sec": DEPLOY_STILL_SEC, "then_test": DEPLOY_THEN_TEST})
 
 @bp.route("/api/follow/calibrate", methods=["POST"])
 def api_follow_calibrate():

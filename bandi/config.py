@@ -265,8 +265,13 @@ _AIM_LABEL = {"floor2": "R1", "rear": "R2", "floor1": "R3"}
 
 # 수납함 출동 — 수납함 칸에서 바깥을 보고 선 R1·R2가 ㄱ자로 나와 R1 앞·R2 뒤로 한 줄 배치
 DEPLOY_OUT_M     = 0.8    # 수납함에서 곧게 나오는 거리 (R1·R2 같음)
-DEPLOY_R1_SIDE_M = 1.4    # R1이 (로봇 기준) 왼쪽으로 꺾은 뒤 가는 거리 — R2가 꺾어 뒤에 설 자리
+DEPLOY_R1_SIDE_M = 1.4    # R1이 (로봇 기준) 왼쪽으로 꺾은 뒤 가는 최소 거리 — R2가 꺾어 뒤에 설 자리
+DEPLOY_TURN_WAIT_SEC = 1.0  # 수납함에서 나온 뒤 멈춰 미끄러짐이 끝나고 이만큼 더 기다렸다 꺾음 (R1·R2)
+DEPLOY_R2_SIDE_M = 0.45   # R2가 꺾은 뒤 적어도 이만큼은 가게 — 간격이 크면 R1이 그만큼 더 멀리 나감 (deploy._r1_side_m)
 DEPLOY_EXTRA_GAP_M = 0.3  # 대기 때 R2는 R1 뒤 (전방–후방 간격 + 이만큼) — 대피자가 설 자리
 DEFAULT_DEPLOY_SLOT_CM = 35   # 수납함 R1 칸–R2 칸 중심 간격 (R2는 R1의 로봇 기준 오른쪽 칸)
 DEPLOY_STILL_SEC = 3.0    # 대피자가 R1·R2 사이에서 이만큼 머물면(카메라 다가옴·정지·멀어짐) 경로 안내 시작
 DEPLOY_START_TTS = "경로 안내를 시작합니다"
+
+DEPLOY_THEN_TEST = False  # False = 출동(배치)만 하고 멈춤 → 이어서 재난 트리거로 고른 2층 경로 시험.
+                          # True = 배치 뒤 대피자 3초 머묾 확인 → ㄱ자 테스트 경로 (팀원이 만든 원래 흐름)

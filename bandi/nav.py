@@ -315,7 +315,7 @@ def _learn_coast(key, label, goal, pos, pause, stop=None):
               f"기준 속도 미끄러짐 {_uturn_learned[name]:.0f}cm (지금 속도면 {_coast_cm(key, v):.0f}cm 일찍 멈춤)")
 
 
-def _run_path_nav(bolt, path, state_key, label, move_color, done_color, gen=None):
+def _run_path_nav(bolt, path, state_key, label, move_color, done_color, gen=None, turn_pause=None):
     """위치 기반 경로 실행 — 구간 끝 지점을 좌표로 정해 놓고 도착할 때까지 보정하며 간다"""
     def cancelled():
         return gen is not None and gen != rt.run_gen
@@ -350,7 +350,7 @@ def _run_path_nav(bolt, path, state_key, label, move_color, done_color, gen=None
     _set_led(bolt, *move_color)
     factor = TARGET_MODES[state["target"]]["mps"]
     speed = min(255, int(state["speeds"][state_key] * factor))
-    turn_pause = state["turn_pause"]
+    turn_pause = state["turn_pause"] if turn_pause is None else turn_pause
     meters = _path_meters(path)
     offs = [(0.0, 0.0)]
     for (spd, h, dur, ch), m in zip(path, meters):
@@ -430,12 +430,12 @@ def _run_path_nav(bolt, path, state_key, label, move_color, done_color, gen=None
     log_event(f"✅ {label} 경로 완료")
     return True
 
-def _run_path(bolt, path, state_key, label, move_color, done_color, gen=None):
+def _run_path(bolt, path, state_key, label, move_color, done_color, gen=None, turn_pause=None):
     """위치 센서가 있으면 위치 기반, 없으면 시간 기반"""
     if _nav_available(state_key, bolt):
-        return _run_path_nav(bolt, path, state_key, label, move_color, done_color, gen)
+        return _run_path_nav(bolt, path, state_key, label, move_color, done_color, gen, turn_pause)
     log_event(f"  ⏱ {label} 위치 센서 없음 — 시간 기반 주행")
-    return _run_path_time(bolt, path, state_key, label, move_color, done_color, gen)
+    return _run_path_time(bolt, path, state_key, label, move_color, done_color, gen, turn_pause)
 
 def _return_home(key, gen):
     """위치를 알면 지나온 지점을 거꾸로 거쳐 출발 좌표로, 모르면 시간 되짚기"""
@@ -645,7 +645,7 @@ def _calibrate_axes(key, bolt, heading, speed, cancelled):
                      else f"{time.time() - t0:.0f}초 동안 위치 변화 {moved:.0f}cm (바퀴가 헛돌거나 위치 값이 안 바뀜)"))
     return None
 
-def _run_path_time(bolt, path, state_key, label, move_color, done_color, gen=None):
+def _run_path_time(bolt, path, state_key, label, move_color, done_color, gen=None, turn_pause=None):
     """범용 경로 실행 — 2F/1F 공통. 상황 해제(세대 변경) 시 멈추고 False 반환"""
     def cancelled():
         return gen is not None and gen != rt.run_gen
@@ -675,7 +675,7 @@ def _run_path_time(bolt, path, state_key, label, move_color, done_color, gen=Non
     time_scale = SPEED_REF / my_speed        # 각자 자기 속도로 환산 → 속도를 바꿔도 정해진 거리만 간다
     if state_key == "rear":
         time_scale *= state["r2_dist_pct"] / 100
-    turn_pause = state["turn_pause"]
+    turn_pause = state["turn_pause"] if turn_pause is None else turn_pause
     prev_heading = None
 
     for i, (speed, heading, duration, char) in enumerate(path):
