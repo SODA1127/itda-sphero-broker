@@ -33,7 +33,7 @@ const FP_ROUTES_2F = {
 };
 const toPct = pts => pts.map(([x, y]) => [x / FP_W * 100, y / FP_H * 100]);
 const fpR2Start = gap => [Math.min(1300, FP_R1_START[0] + gap * FP_PX_PER_M), FP_R1_START[1]];
-let ROUTE_KEY = 'stairs';
+let ROUTE_KEY = 'short';
 let ROUTE_2F = [], ROUTE_2F_LEN_M = [];
 // 로봇 표시용 전체 경로 = R2 대기 자리 → R1 출발점(FH) → 고른 경로 (서버 config._full_route와 같은 모양)
 function buildRoute2F(key, gap) {

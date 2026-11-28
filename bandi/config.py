@@ -61,7 +61,7 @@ ROUTES_2F = {
                "route": _sec_route((0, 7), (270, 5))},
 }
 
-DEFAULT_ROUTE = "stairs"   # 예전 2층 경로처럼 계단에서 R3로 넘김
+DEFAULT_ROUTE = "short"    # ① 최단 — 2층 출구
 
 ROUTE_2F_M = ROUTES_2F[DEFAULT_ROUTE]["route"]     # 기본 경로 (대시보드 도면 표시용)
 
