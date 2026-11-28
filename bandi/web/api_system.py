@@ -2,8 +2,9 @@
 
 import threading
 import time
+from datetime import datetime
 
-from flask import Blueprint, jsonify, request as flask_request
+from flask import Blueprint, Response, jsonify, request as flask_request
 
 from ..ble import _broker_main
 from ..config import (
@@ -12,6 +13,7 @@ from ..config import (
     EXCEPTIONS,
     GAP_MAX_M,
     GAP_MIN_M,
+    LOG_FILE,
     TARGET_MODES,
     _AIM_LABEL,
     _ROBOT_KEYS,
@@ -20,7 +22,7 @@ from ..config import (
 )
 from .. import matrix as _mx
 from ..hw import _bolt_of, _halt, _idle, _pos, _set_led
-from ..manual import _tts
+from ..manual import _tts, manual_speed
 from ..nav import _return_home
 from ..scenario import trigger_signal
 from ..state import (
@@ -60,6 +62,8 @@ def api_status():
             "names":         state["names"],
             "connecting":    state["connecting"],
             "server_ip":     _lan_ip(),
+            "app_url":       f"http://{_lan_ip()}:{rt.port}",
+            "shake_detect":  state["shake_detect"],
             "phone":         {**state["phone"],
                               "age": round(time.time() - state["phone"]["ts"], 1) if state["phone"]["ts"] else None},
             "aim":           state["aim"],
@@ -70,7 +74,8 @@ def api_status():
             "r2_dist_pct":   state["r2_dist_pct"],
             "follow_gap":    state["follow_gap"],
             "test_running":  _test_running["on"],
-            "manual":        {k: state["manual"][k] for k in ("on", "reason", "heading", "cmd")},
+            "manual":        {**{k: state["manual"][k] for k in ("on", "reason", "heading", "cmd")},
+                              "speed": manual_speed()},
             "ir":            state.get("ir", "off"),
             "tts":           {"id": _tts["id"], "text": _tts["text"]},
             "positions":     {k: (lambda p: {"x": round(p[0]), "y": round(p[1])} if p else None)(_pos(k, _bolt_of(k)))
@@ -118,6 +123,11 @@ def api_trigger():
 def api_disaster():
     kind = (flask_request.get_json(silent=True) or {}).get("type")
     if kind == "clear":
+        returning = [k for k in ("floor2", "rear", "floor1") if _active(k) and state[k].get("returning")]
+        if returning:          # 이미 복귀 중 — 다시 누르면 복귀가 겹쳐 같은 로봇을 여럿이 움직임
+            names = ", ".join(_AIM_LABEL[k] for k in returning)
+            log_event(f"⚠ 이미 평시 복귀 중 ({names}) — 상황 해제 무시")
+            return jsonify({"ok": False, "error": f"이미 복귀 중 ({names})"}), 409
         api_reset()
         log_event("🟢 상황 해제 — 전 로봇 평시 복귀")
         gen = rt.run_gen
@@ -260,6 +270,45 @@ def api_disconnect():
     _broker_stop_evt.set()   # 하트비트 루프 종료 → with 블록 탈출 → BLE 해제
     log_event("🔌 연결 해제 요청")
     return jsonify({"ok": True})
+
+@bp.route("/api/shake", methods=["POST"])
+def api_shake():
+    """R1 흔들기 지진 감지 켜기/끄기 — 테스트 중 로봇을 손으로 옮길 때는 끔"""
+    on = bool((flask_request.get_json(silent=True) or {}).get("on"))
+    with _state_lock:
+        state["shake_detect"] = on
+    _save_settings()
+    log_event(f"🌍 R1 흔들기 지진 감지 {'켬' if on else '끔 — 테스트 중 로봇을 옮겨도 지진으로 보지 않음'}")
+    return jsonify({"ok": True, "on": on})
+
+
+@bp.route("/api/discover")
+def api_discover():
+    """R2 앱 주소 자동 찾기 — 앱이 workers.dev로 물어보면 같은 와이파이에서 쓸 브로커 주소를 알려줌"""
+    return jsonify({"ok": True, "service": "bandi", "lan_url": f"http://{_lan_ip()}:{rt.port}"})
+
+
+@bp.route("/api/logs/download")
+def api_logs_download():
+    """브로커 로그 파일 내려받기 — scope=session(이번 실행부터, 기본) | all. HTTP 요청 줄은 뺌"""
+    scope = flask_request.args.get("scope", "session")
+    since = datetime.fromtimestamp(rt.started_at).strftime("%Y-%m-%d %H:%M:%S") if scope == "session" else ""
+    out, keep = [], not since
+    try:
+        with open(LOG_FILE, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if " - - [" in line and "HTTP/1." in line:     # werkzeug 요청 줄 (색 코드 포함)
+                    continue
+                if since and line[:4].isdigit() and line[4:5] == "-":
+                    keep = line[:19] >= since      # 타임스탬프 없는 줄(오류 추적 등)은 앞 줄을 따름
+                if keep:
+                    out.append(line)
+    except OSError:
+        return jsonify({"ok": False, "error": "로그 파일이 아직 없습니다."}), 404
+    name = f"bandi_{'session' if since else 'all'}_{datetime.now():%Y%m%d-%H%M}.log"
+    return Response("".join(out), mimetype="text/plain; charset=utf-8",
+                    headers={"Content-Disposition": f"attachment; filename={name}"})
+
 
 @bp.route("/api/restart", methods=["POST"])
 def api_restart():

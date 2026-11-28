@@ -74,6 +74,7 @@ IDLE → ARMED → GUIDING → HANDOFF → COMPLETE 흐름과 예외 처리 E2�
 | `sphero_broker.py` | 실행 파일 (`bandi.app.main` 호출) |
 | `bandi/` | 브로커 파이썬 패키지 — 아래 코드 구조 참고 |
 | `frontend/` | 대시보드 화면 — `templates/index.html`, `static/css`, `static/js` |
+| `cloudflare/` | 외부 접속 Worker(`bandi`)와 터널 실행 스크립트 |
 | `floorplan_1f.png`, `floorplan_2f.png` | 대시보드용 팔달관 1·2층 도면 |
 | `brand/` | BANDI 로고(투명 배경) · 심볼 · 파비콘 |
 | `팔달관_도면.pdf`, `팔달관_도면.html` | 층별 도면 원본 (실측 기입용) |
@@ -95,7 +96,7 @@ IDLE → ARMED → GUIDING → HANDOFF → COMPLETE 흐름과 예외 처리 E2�
 | `bandi/aim.py` | 방향 보정 — 수동 에임, 나침반 자동 에임 |
 | `bandi/camera.py` | R2 카메라 앱 감지 상태(넘어짐·시야 이탈), 프리뷰 프레임 |
 | `bandi/ble.py` | Sphero BLE 연결·센서 스트리밍·하트비트, R1 흔들기(지진) 감지 |
-| `bandi/web/` | Flask 앱 조립(`server.py`)과 Blueprint — `pages`, `api_system`, `api_robot`, `api_manual`, `api_camera` |
+| `bandi/web/` | Flask 앱 조립(`server.py`), 외부 접속 보호(`auth.py`)와 Blueprint — `pages`, `api_system`, `api_robot`, `api_manual`, `api_camera` |
 | `bandi/app.py` | 진입점 — 로그 설정, BLE·감시 스레드 시작, 웹 서버 실행 |
 
 의존 방향: `config → state → hw → nav → manual → follow → scenario → ble → web` (아래 모듈이 위 모듈을 가져다 씀, 순환 없음).
@@ -118,6 +119,24 @@ python3.9 sphero_broker.py --sim --port 5002
 ```
 
 대시보드: http://localhost:5001
+
+## 외부 접속 (Cloudflare)
+
+같은 와이파이 밖에서는 **https://bandi.dlrlwjd1127.workers.dev** 로 대시보드를 본다.
+
+```
+브라우저 → Worker bandi (cloudflare/) → Workers VPC 서비스 bandi-broker → 터널 bandi → 맥의 브로커 127.0.0.1:5002
+```
+
+- 터널에 공개 주소가 없어서 Worker를 거쳐야만 들어온다. Worker가 `X-Bandi-Remote: 1`을 붙이고, 브로커는 이 요청을 외부로 본다.
+- 외부는 **보기 전용** — 상단 바에 원격 조작 비밀번호를 넣으면 7일간 조작 가능. 비밀번호는 `BANDI_REMOTE_PASSWORD` 환경 변수 또는 저장소 루트 `remote_password.txt` (git 제외). 없으면 보기만.
+- 틀린 비밀번호는 IP당 1분 5회까지. 외부 화면은 요청 수를 줄이려 2초마다 갱신 (Workers 무료 한도 하루 10만 건).
+- 같은 와이파이의 폰 앱·대시보드는 지금처럼 모두 가능.
+
+```bash
+./cloudflare/run-tunnel.sh                 # 터널 켜기 (브로커와 함께)
+cd cloudflare && npx wrangler deploy       # Worker 수정 뒤 배포
+```
 
 ## 주행 흐름
 
@@ -166,7 +185,7 @@ R2가 따라가다 R1을 놓치면 자동 주행을 멈추고 대시보드 수�
 | 전방–후방 간격 | 400cm | 10~1420cm. R1이 R2보다 이만큼 앞에서 출발 |
 | R2 출발 지연 | 0초 | 0이면 R1과 동시 출발 |
 | 꺾기 전 정지 | 1초 | 방향이 바뀌는 지점에서 멈춤 |
-| R2 거리 보정 | 100% | 시간 기반 주행일 때만 사용 (폰 무게로 덜 가면 올림) |
+| R2 거리 보정 | 100% | R2가 트롤리 때문에 바퀴가 미끄러져 덜 가면 올림 — 위치 센서 거리를 이 비율로 나눠 실제 거리로 봄 (시간 기반 주행은 시간을 늘림) |
 
 ### 방향 보정 — 기준: R2 스마트폰 셀피 정면 = 0°
 

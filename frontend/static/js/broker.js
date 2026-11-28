@@ -68,3 +68,20 @@ function connectSphero() {
     btn.disabled = false;
   });
 }
+
+// 이벤트 로그 내려받기 — 외부 접속은 로그인해야 받을 수 있음(401이면 로그인 바가 깜빡임)
+function downloadLog(scope) {
+  fetch('/api/logs/download?scope=' + scope)
+    .then(r => {
+      if (!r.ok) return r.json().then(j => { if (r.status !== 401) alert(j.error || '내려받기 실패'); });
+      const name = (r.headers.get('Content-Disposition') || '').split('filename=')[1] || 'bandi.log';
+      return r.blob().then(b => {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(b);
+        a.download = name;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+      });
+    })
+    .catch(console.error);
+}

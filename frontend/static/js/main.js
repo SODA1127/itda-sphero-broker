@@ -84,8 +84,11 @@ function update() {
       renderFlow(d);
       renderAim(d);
       renderSpeeds(d);
-      document.getElementById('appUrl').textContent =
-        `http://${d.server_ip}:${location.port || (location.protocol === 'https:' ? 443 : 80)}`;
+      document.getElementById('appUrl').textContent = d.app_url;
+      shakeOn = !!d.shake_detect;
+      const sb = document.getElementById('btnShake');
+      sb.textContent = shakeOn ? '🌍 흔들기 지진 감지: 켜짐' : '🌍 흔들기 지진 감지: 꺼짐 (테스트용)';
+      sb.style.color = shakeOn ? '' : 'var(--yel)';
 
       // counter
       document.getElementById('triggerCount').textContent = d.trigger_count;
@@ -122,3 +125,7 @@ function update() {
     e.target.dataset.touched = '1';
   });
 });
+
+// R1 흔들기 지진 감지 — 테스트 중에는 꺼 두면 로봇을 손으로 옮겨도 지진이 발동하지 않음
+let shakeOn = true;
+function toggleShake() { postJSON('/api/shake', { on: !shakeOn }); }

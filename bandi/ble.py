@@ -25,7 +25,7 @@ def _on_2f_sensor(data: dict):
                 "x": round(ax, 2), "y": round(ay, 2), "z": round(az, 2)}
 
         magnitude = (ax**2 + ay**2 + az**2) ** 0.5
-        if magnitude > SHAKE_THRESHOLD:
+        if magnitude > SHAKE_THRESHOLD and state["shake_detect"]:
             if _robots_in_motion() or time.time() - rt.last_motion_end < SHAKE_QUIET_SEC:
                 return   # 로봇 자신의 주행·회전·충돌 — 지진 아님
             rt.last_shake_ts = time.time()

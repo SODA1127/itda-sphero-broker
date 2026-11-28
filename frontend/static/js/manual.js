@@ -10,7 +10,7 @@ function renderManual(d) {
   btn.textContent = manualOn ? '🎮 수동 조작 끝내기' : '🎮 수동 조작';
   document.getElementById('manualPanel').hidden = !manualOn;
   document.getElementById('manualReason').textContent = '🎮 수동 조작 중 — ' + (m.reason || '대시보드에서 전환');
-  document.getElementById('manualHeading').textContent = `방향 ${m.heading ?? 0}°` + (m.cmd === 'w' ? ' · 전진 중' : m.cmd === 's' ? ' · 후진 중' : '');
+  document.getElementById('manualHeading').textContent = `방향 ${m.heading ?? 0}° · 속도 ${m.speed ?? '—'} (R2 주행 속도 설정)` + (m.cmd === 'w' ? ' · 전진 중' : m.cmd === 's' ? ' · 후진 중' : '');
   const chip = document.getElementById('irChip');
   chip.className = 'ir-chip ' + (d.ir || 'off');
   chip.textContent = IR_TEXT[d.ir] || 'IR —';

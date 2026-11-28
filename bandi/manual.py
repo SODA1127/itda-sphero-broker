@@ -3,11 +3,11 @@
 import threading
 import time
 
-from .hw import _halt, _set_led, _set_matrix
+from .config import TARGET_MODES
+from .hw import _halt, _pos, _raw, _set_led, _set_matrix
 from .state import _state_lock, log_event, raise_exception, rt, state
 
 
-# 수동 조작 주행 속도 = 대시보드 '주행 속도'의 R2 값 (안내 대상 배율은 적용 안 함)
 
 MANUAL_TURN_DEG = 15           # A/D 한 번에 도는 각도
 
@@ -17,7 +17,46 @@ TTS_MAX_AGE    = 15.0          # 폰이 이보다 오래된 TTS는 무시
 
 _manual_lock = threading.Lock()
 
-_manual_last = {"ts": 0.0}
+_manual_last = {"ts": 0.0, "turn_ts": 0.0, "turn_from": None}
+TURN_LOG_GAP_SEC = 0.8     # A/D를 떼고 이만큼 지나면 연속 회전을 한 줄로 기록
+
+
+def manual_speed():
+    """수동 조작 속도 = 주행 설정의 R2 속도 × 안내 대상 모드 배율 (자동 따라가기와 같은 계산)"""
+    return min(255, int(state["speeds"]["rear"] * TARGET_MODES[state["target"]]["mps"]))
+
+
+def _log_manual_drive(cmd, heading, reason=""):
+    """수동 조작 주행 상태가 바뀔 때만 기록 (W/S는 누르는 동안 0.15초마다 오므로).
+    정지할 때는 R2 위치도 남겨, 시나리오대로 조작했을 때 어디서 틀어지는지 비교할 수 있게"""
+    word = {"w": "전진", "s": "후진", None: "정지"}[cmd]
+    detail = f"방향 {heading}°"
+    if cmd is None:
+        # 좌표축 보정 전(자동 주행 없이 바로 수동 조작)이면 위치 센서 원래 값 — 보정값은 보통 0°라 거의 같다
+        p = _pos("rear", rt.bolt_r2) or _raw("rear")
+        if p is not None:
+            detail += f", 위치 ({p[0]:.0f}, {p[1]:.0f})cm"
+    else:
+        detail += f", 속도 {manual_speed()}"
+    log_event(f"  🎮 R2 {word} ({detail})" + (f" — {reason}" if reason else ""))
+
+
+def _note_manual_turn(before):
+    """A/D 회전 시작 방향을 기억 — 연속으로 누른 회전은 손을 뗀 뒤 한 줄로 기록"""
+    if _manual_last["turn_from"] is None:
+        _manual_last["turn_from"] = before
+    _manual_last["turn_ts"] = time.time()
+
+
+def _flush_manual_turn(force=False):
+    start = _manual_last["turn_from"]
+    if start is None or (not force and time.time() - _manual_last["turn_ts"] < TURN_LOG_GAP_SEC):
+        return
+    _manual_last["turn_from"] = None
+    end = state["manual"]["heading"]
+    delta = (end - start + 540) % 360 - 180
+    if delta:
+        log_event(f"  🎮 R2 {'우' if delta > 0 else '좌'}회전 {abs(delta)}° (방향 {start}° → {end}°)")
 
 _tts = {"id": 0, "text": "", "ts": 0.0}
 
@@ -55,19 +94,17 @@ def _exit_manual():
     log_event("🎮 R2 수동 조작 해제 — 다음 주행부터 자동")
     return True
 
-def _manual_speed():
-    return max(1, min(255, int(state["speeds"]["rear"])))
-
 def _manual_watchdog():
     """W/S를 누르고 있는 동안만 달림 — 신호가 끊기면 세움"""
     while True:
         time.sleep(0.1)
         m = state["manual"]
-        if m["on"] and m["cmd"] in ("w", "s") and time.time() - _manual_last["ts"] > MANUAL_HOLD_SEC:
-            with _manual_lock:
+        with _manual_lock:
+            _flush_manual_turn()
+            if m["on"] and m["cmd"] in ("w", "s") and time.time() - _manual_last["ts"] > MANUAL_HOLD_SEC:
                 m["cmd"] = None
                 _halt("rear", rt.bolt_r2, m["heading"])
-            log_event(f"🎮 R2 정지 (키 뗌 · 방향 {m['heading']}°)")
+                _log_manual_drive(None, m["heading"], "조작 신호 끊김")
 
 MANUAL_MATRIX = {
     "up":    ("^", (0, 255, 0)),

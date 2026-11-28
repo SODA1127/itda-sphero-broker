@@ -5,3 +5,7 @@ __pycache__/
 nohup.out
 speed_settings.json
 .venv/
+remote_password.txt
+.flask_secret
+cloudflare/node_modules/
+cloudflare/.wrangler/

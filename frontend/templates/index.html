@@ -17,6 +17,15 @@
   <span class="state-pill" id="statePill" title="시스템 상태">IDLE</span>
   <button class="hdr-btn" onclick="restartBroker()">↺ 브로커 재시작</button>
 </header>
+<div class="remote-bar" id="remoteBar" hidden>
+  <span id="remoteText">🌐 외부 접속 — 보기 전용</span>
+  <form id="remoteForm" onsubmit="remoteLogin(event)">
+    <input id="remotePw" type="password" placeholder="원격 조작 비밀번호" autocomplete="current-password">
+    <button class="btn btn-connect" type="submit">🔓 조작 로그인</button>
+  </form>
+  <button class="btn btn-reset" id="remoteLogout" onclick="remoteLogout()" hidden>로그아웃</button>
+  <span id="remoteErr"></span>
+</div>
 
 <div class="fall-alert" id="fallAlert" role="alert" onclick="document.getElementById('followWrapCard').scrollIntoView({behavior:'smooth'})">
   <span class="fa-ico">⚠</span>
@@ -146,7 +155,8 @@
       <div class="accel-box"><div class="axis">Y</div><div class="val" id="ay">0.00</div></div>
       <div class="accel-box"><div class="axis">Z</div><div class="val" id="az">0.00</div></div>
     </div>
-    <div class="sub-label" style="margin-top:6px;">가속도계 (G) — 흔들기 임계: {{ cfg.SHAKE_THRESHOLD }}G</div>
+    <div class="sub-label" style="margin-top:6px;">가속도계 (G) — 흔들기 임계: {{ cfg.SHAKE_THRESHOLD }}G
+      <button class="btn btn-reset" id="btnShake" onclick="toggleShake()" style="margin-left:8px;padding:2px 9px;font-size:11px;">🌍 흔들기 감지 —</button></div>
 
     <div class="path-steps" id="pathSteps2f"></div>
     <div class="progress-bar"><div class="progress-inner" id="pathProgress2f" style="width:0%"></div></div>
@@ -344,7 +354,13 @@
 
   <!-- 이벤트 로그 -->
   <div class="card log-wrap">
-    <h2>이벤트 로그 &nbsp;<span class="count-badge" id="triggerCount">0</span></h2>
+    <div class="log-head">
+      <h2>이벤트 로그 &nbsp;<span class="count-badge" id="triggerCount">0</span></h2>
+      <div class="log-dl">
+        <button class="btn btn-reset" onclick="downloadLog('session')" title="브로커를 켠 뒤부터의 로그">⬇ 이번 실행 로그</button>
+        <button class="btn btn-reset" onclick="downloadLog('all')" title="재시작 전 기록까지 모두">⬇ 전체 로그</button>
+      </div>
+    </div>
     <ul class="log-list" id="logList"></ul>
   </div>
   </div><!-- /follow-log-row -->
@@ -361,6 +377,7 @@
 
 <script>window.BANDI = {{ cfg|tojson }};</script>
 <script src="{{ url_for('static', filename='js/config.js') }}?v={{ version }}"></script>
+<script src="{{ url_for('static', filename='js/remote.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/manual.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/controls.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/settings.js') }}?v={{ version }}"></script>
@@ -370,6 +387,6 @@
 <script src="{{ url_for('static', filename='js/matrix.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/main.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/follow.js') }}?v={{ version }}"></script>
-<script>update(); setInterval(update, 800);</script>
+<script>update(); setInterval(update, BANDI.POLL.status);</script>
 </body>
 </html>

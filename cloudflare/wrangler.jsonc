@@ -1,0 +1,15 @@
+// 반디 브로커 외부 접속 — bandi.<계정>.workers.dev → Workers VPC → Cloudflare Tunnel(bandi) → 맥의 브로커(127.0.0.1:5002)
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "bandi",
+  "main": "src/index.js",
+  "compatibility_date": "2026-11-28",
+  "workers_dev": true,
+  "vpc_services": [
+    {
+      "binding": "BROKER",
+      "service_id": "01a22034-fd1a-7d20-99f7-1920d1ad5cc3",
+      "remote": true
+    }
+  ]
+}

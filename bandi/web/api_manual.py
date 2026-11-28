@@ -13,9 +13,12 @@ from ..manual import (
     MANUAL_TURN_DEG,
     _enter_manual,
     _exit_manual,
+    _flush_manual_turn,
+    _log_manual_drive,
     _manual_last,
     _manual_lock,
-    _manual_speed,
+    manual_speed,
+    _note_manual_turn,
     _queue_tts,
 )
 from ..state import _active, _robots_in_motion, log_event, rt, state
@@ -50,36 +53,30 @@ def api_manual_drive():
         return jsonify({"ok": False, "error": "수동 조작 모드 아님"}), 409
     if cmd not in ("w", "a", "s", "d", "stop"):
         return jsonify({"ok": False, "error": "cmd는 w/a/s/d/stop"}), 400
-    speed = _manual_speed()
-    msg = None
     with _manual_lock:
         _manual_last["ts"] = time.time()
         prev = m["cmd"]
+        speed = manual_speed()
         if cmd in ("a", "d"):
+            _note_manual_turn(m["heading"])
             m["heading"] = int(m["heading"] + (MANUAL_TURN_DEG if cmd == "d" else -MANUAL_TURN_DEG)) % 360
             if m["cmd"] == "s":
                 _drive_reverse("rear", rt.bolt_r2, m["heading"], speed)   # 후진 중이면 앞 방향만 바꿈
             else:                                              # 전진 중이면 방향만, 서 있으면 제자리 회전
                 _drive("rear", rt.bolt_r2, m["heading"], speed if m["cmd"] == "w" else 0)
-            msg = f"{'오른쪽' if cmd == 'd' else '왼쪽'} {MANUAL_TURN_DEG}° → 방향 {m['heading']}°"
         elif cmd == "w":
             m["cmd"] = "w"
             _drive("rear", rt.bolt_r2, m["heading"], speed)
-            if prev != "w":                                     # 누르는 동안 반복 전송 — 시작할 때만 기록
-                msg = f"전진 (방향 {m['heading']}° · 속도 {speed})"
         elif cmd == "s":
             m["cmd"] = "s"
             _drive_reverse("rear", rt.bolt_r2, m["heading"], speed)   # 방향 그대로 뒤로
-            if prev != "s":
-                msg = f"후진 (방향 {m['heading']}° · 속도 {speed})"
         else:
             m["cmd"] = None
             _halt("rear", rt.bolt_r2, m["heading"])
-            if prev is not None:
-                msg = f"정지 (방향 {m['heading']}°)"
-    if msg:
-        log_event(f"🎮 R2 {msg}")
-    return jsonify({"ok": True, "heading": m["heading"], "speed": speed})
+        if m["cmd"] != prev:                       # 전진·후진·정지가 바뀔 때만 기록
+            _flush_manual_turn(force=True)
+            _log_manual_drive(m["cmd"], m["heading"])
+    return jsonify({"ok": True, "heading": m["heading"]})
 
 @bp.route("/api/manual/matrix", methods=["POST"])
 def api_manual_matrix():
