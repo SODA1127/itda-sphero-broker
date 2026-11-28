@@ -1,0 +1,7 @@
+flask>=3.0
+flask-sock
+spherov2>=0.12
+bleak
+# 선택: 카메라 방향 판단에 외부 API 사용 시 (JEV_API_KEY / ANTHROPIC_API_KEY)
+requests
+anthropic
