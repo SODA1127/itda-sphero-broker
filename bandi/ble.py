@@ -1,5 +1,6 @@
 """BLE 연결 — Sphero 연결·센서 스트리밍·하트비트, R1 흔들기(지진) 감지"""
 
+import contextlib
 import threading
 import time
 
@@ -31,6 +32,8 @@ def _on_2f_sensor(data: dict):
             trigger_signal(f"2F-shake({magnitude:.1f}G)", "quake")
     except Exception:
         pass
+
+CONNECT_TRIES = 3      # 스캔 뒤 실제 BLE 접속 재시도 횟수
 
 def _connect_sphero(name: str, label: str):
     """BLE 스캔 후 연결. 실패 시 None 반환."""
@@ -141,12 +144,27 @@ def _broker_main(sim: bool):
         @property
         def sensor_control(self): return self._DummySensor()
 
-    # find_toy()가 이미 BOLT 인스턴스를 반환 — 그대로 컨텍스트 매니저로 사용
-    ctx_2f = toy_2f if toy_2f else _Dummy()
-    ctx_1f = toy_1f if toy_1f else _Dummy()
-    ctx_r2 = toy_r2 if toy_r2 else _Dummy()
+    # find_toy()가 이미 BOLT 인스턴스를 반환 — 그대로 컨텍스트 매니저로 사용.
+    # 스캔으로 찾았어도 실제 접속(macOS CoreBluetooth)이 '기기 없음'으로 실패할 때가 있어 몇 번 다시 시도하고,
+    # 끝내 안 되면 그 로봇만 미연결로 두고 나머지는 계속 (예전엔 스레드가 조용히 죽고 '연결됨'으로 남았음)
+    def _enter(stack, toy, key, label):
+        if toy is None:
+            return stack.enter_context(_Dummy())
+        for attempt in range(1, CONNECT_TRIES + 1):
+            try:
+                return stack.enter_context(toy)
+            except Exception as e:
+                log_event(f"⚠ {label} BLE 접속 실패 ({attempt}/{CONNECT_TRIES}): {e}")
+                time.sleep(1.0)
+        with _state_lock:
+            state[key]["connected"] = False
+        log_event(f"❌ {label} 접속 포기 — 로봇을 깨운 뒤 '연결 해제' → '연결 시작'")
+        return stack.enter_context(_Dummy())
 
-    with ctx_2f as b2, ctx_1f as b1, ctx_r2 as br:
+    with contextlib.ExitStack() as stack:
+        b2 = _enter(stack, toy_2f, "floor2", "2층(R1)")
+        b1 = _enter(stack, toy_1f, "floor1", "1층(R3)")
+        br = _enter(stack, toy_r2, "rear", "2층 후방(R2)")
         rt.bolt_2f, rt.bolt_1f, rt.bolt_r2 = b2, b1, br
 
         # wake → 매트릭스 그림 저장 → 초기 LED: 녹색 + 매트릭스 "Floor N" 스크롤 → 잠시 뒤 끔(⓪ 평소 대기)
